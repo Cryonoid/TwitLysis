@@ -1,6 +1,9 @@
 import time
 import random
 import traceback
+import json
+import os
+from datetime import datetime
 from bs4 import BeautifulSoup
 import yaml
 import nltk # Keep NLTK imports if used elsewhere
@@ -15,6 +18,9 @@ from selenium.common.exceptions import WebDriverException, TimeoutException, NoS
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
+from webdriver_manager.chrome import ChromeDriverManager
+
 
 # Your error_tracker and SEARCH_TERMS dictionaries remain the same
 error_tracker = {
@@ -34,6 +40,52 @@ SEARCH_TERMS = {
     "sports": ["NBA", "Soccer", "Tennis", "Olympics", "Formula 1"],
     "business": ["Startup Funding", "Stock Market", "Entrepreneurship", "Business Strategy", "Crypto"]
 }
+
+# Expanded pool of user agents for anti-detection
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+]
+
+
+def load_cookies(config_file="twitter_cookies.json"):
+    """
+    Load cookies from a JSON file for authentication.
+    Expected format: {"auth_token": "your_auth_token"}
+    """
+    try:
+        if os.path.exists(config_file):
+            with open(config_file, "r") as f:
+                cookies = json.load(f)
+            auth_token = cookies.get("auth_token", None)
+            if not auth_token:
+                print("[WARNING] No auth_token found in cookie file.")
+                return None
+            print("[DEBUG] Auth token loaded successfully.")
+            return auth_token
+        else:
+            print(f"[WARNING] Cookie file {config_file} not found.")
+            return None
+    except Exception as e:
+        print(f"[ERROR] Failed to load cookies: {str(e)}")
+        return None
+
+def simulate_human_behavior(driver):
+    """
+    Simulate human-like mouse movements and pauses.
+    """
+    try:
+        actions = ActionChains(driver)
+        # Constrain offsets to smaller range
+        actions.move_by_offset(random.randint(-50, 50), random.randint(-50, 50)).perform()
+        time.sleep(random.uniform(0.5, 1.5))
+        time.sleep(random.uniform(1.0, 3.0))
+    except Exception as e:
+        print(f"[WARNING] Failed to simulate human behavior: {str(e)}. Skipping movement.")
 
 
 def select_random_search_term():
