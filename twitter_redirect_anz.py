@@ -31,6 +31,7 @@ error_tracker = {
     "nlp_processing": {"status": "not_started", "error": None},
     "deduplication": {"status": "not_started", "error": None},
     "file_operations": {"status": "not_started", "error": None},
+    "captcha_detection": {"status": "not_started", "error": None},
 }
 
 SEARCH_TERMS = {
@@ -74,6 +75,41 @@ def load_cookies(config_file="twitter_cookies.json"):
         print(f"[ERROR] Failed to load cookies: {str(e)}")
         return None
 
+def save_debug_html(content, search_term, attempt, reason):
+    """
+    Save debug HTML with metadata for improved debugging.
+    """
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"debug_{reason}_{search_term.replace(' ', '_')}_attempt{attempt}_{timestamp}.html"
+        metadata = f"<!-- Debug Info: Search Term: {search_term}, Attempt: {attempt}, Reason: {reason}, Timestamp: {timestamp} -->\n"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(metadata + content)
+        print(f"[DEBUG] Saved debug HTML to {filename}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save debug HTML: {str(e)}")
+
+def detect_captcha(driver):
+    """
+    Detect CAPTCHA presence by checking for known CAPTCHA elements or URLs.
+    """
+    try:
+        captcha_indicators = [
+            (By.XPATH, "//div[contains(@class, 'g-recaptcha')]"),
+            (By.XPATH, "//input[@id='challenge_response']"),
+            (By.XPATH, "//h1[contains(text(), 'Verify you are not a robot')]"),
+            (By.XPATH, "//form[contains(@action, 'challenge')]"),
+        ]
+        for by, value in captcha_indicators:
+            if driver.find_elements(by, value):
+                return True
+        if "x.com/i/flow/captcha" in driver.current_url.lower():
+            return True
+        return False
+    except Exception as e:
+        print(f"[ERROR] Error detecting CAPTCHA: {str(e)}")
+        return False
+
 def simulate_human_behavior(driver):
     """
     Simulate human-like mouse movements and pauses.
@@ -97,18 +133,22 @@ def select_random_search_term():
     print(f"Randomly selected search term: '{term}' from category: {category}")
     return term
 
-def scrape_twitter_trends(search_term: str) -> list:
+def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10) -> list:
     """
     Scrape tweets related to the search term from Twitter.
     Returns a list of tweet dictionaries or empty list if failed.
     """
     driver = None
-    # Assuming error_tracker is global or passed appropriately and reset by the caller.
-
+    attempt = 1
+    tweets = []
+    rate_limit_requests = 5
+    requests_made = 0
+    while attempt <= max_retries:
+    print(f"[ATTEMPT {attempt}/{max_retries}] Scraping for '{search_term}'...")
     try:
+        # Driver Setup
         error_tracker["driver_setup"]["status"] = "in_progress"
         print(f"[SETUP] Initializing Chrome WebDriver...")
-        chrome_driver_path = r"C:\Users\incre\Downloads\chromedriver-win64\chromedriver-win64\chromedriver.exe" # Ensure this is correct
 
         chrome_options = Options()
         # --- IMPORTANT DEBUGGING TIP ---
@@ -121,34 +161,68 @@ def scrape_twitter_trends(search_term: str) -> list:
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--lang=en-US,en;q=0.9") # More common lang format
-        # Use a recent and common user agent. Update this periodically.
-        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36") # Example, use a current one
-
+        chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
         # --- Anti-detection measures ---
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
-        # --- End Anti-detection ---
-
+        chrome_options.add_argument("--disable-infobars")
+        chrome_options.add_argument(f"--window-size={random.randint(1200, 1920)},{random.randint(800, 1080)}")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--profile-directory=Default")
+        chrome_options.add_argument("--disable-plugins-discovery")
+        
         try:
+            print("[SETUP] Attempting to use webdriver_manager...")
             service = Service(executable_path=chrome_driver_path)
             # Consider using webdriver-manager for automatic driver updates:
             # from webdriver_manager.chrome import ChromeDriverManager
             # service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
+            print("[SETUP] Chrome WebDriver initialized successfully via webdriver_manager.")
+        except Exception as e_manager:
+            print(f"[WARNING] webdriver_manager failed: {str(e_manager)}")
+            chrome_driver_path = "/usr/local/bin/chromedriver"
+            print(f"[SETUP] Falling back to system ChromeDriver at {chrome_driver_path}...")
+            if not os.path.exists(chrome_driver_path):
+                raise WebDriverException(f"ChromeDriver not found at {chrome_driver_path}")
+            service = Service(executable_path=chrome_driver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            print("[SETUP] Chrome WebDriver initialized successfully using system ChromeDriver.")
 
             # --- Further Anti-detection (after driver is initialized) ---
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            driver.execute_script("window.navigator.chrome = { runtime: {} };")
+
+            driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () =>  [1, 2, 3, 4, 5] });")
             # --- End Further Anti-detection ---
             error_tracker["driver_setup"]["status"] = "success"
-        except WebDriverException as e:
-            error_tracker["driver_setup"]["status"] = "failed"
-            error_tracker["driver_setup"]["error"] = str(e)
-            print(f"[ERROR] Chrome WebDriver setup failed: {str(e)}")
-            return []
 
-        driver.set_window_size(1920, 1080)
-
+                    # Load cookies for authentication
+            auth_token = load_cookies()
+            if auth_token:
+                print("[AUTH] Applying authentication cookies...")
+                try:
+                    driver.get("https://x.com")
+                    time.sleep(random.uniform(2, 4))
+                    driver.add_cookie({
+                        "name": "auth_token",
+                        "value": auth_token,
+                        "domain": ".x.com",
+                        "secure": True,
+                        "httpOnly": True,
+                        "path": "/",
+                    })
+                    print("[AUTH] Cookies applied successfully.")
+                    driver.refresh()
+                    time.sleep(random.uniform(2, 4))
+                    simulate_human_behavior(driver)
+                except Exception as e:
+                    print(f"[ERROR] Failed to set cookies: {str(e)}")
+                    error_tracker["page_load"]["status"] = "failed"
+                    error_tracker["page_load"]["error"] = f"Cookie application failed: {str(e)}"
+                    attempt += 1
+                    continue
         error_tracker["page_load"]["status"] = "in_progress"
         url = f"https://twitter.com/search?q={search_term}&src=typed_query&f=live"
         print(f"[NETWORK] Accessing URL: {url}")
@@ -168,16 +242,28 @@ def scrape_twitter_trends(search_term: str) -> list:
                 )
             )
 
+            
+            error_tracker["captcha_detection"]["status"] = "in_progress"
+            if detect_captcha(driver):
+                error_tracker["captcha_detection"]["status"] = "failed"
+                error_tracker["captcha_detection"]["error"] = "CAPTCHA detected; stopping to avoid ban risk."
+                print("[ERROR] CAPTCHA detected. Saving page source and stopping to avoid ban risk.")
+                save_debug_html(driver.page_source, search_term, attempt, "captcha")
+                print("[INFO] Please solve the CAPTCHA manually in a browser, update twitter_cookies.json, and try again.")
+                return []
+            error_tracker["captcha_detection"]["status"] = "success"
+
             current_url_lower = driver.current_url.lower()
             page_title_lower = driver.title.lower()
 
             # More robust check for redirection or login page
             # Check if we are on a known search or explore page.
             # If not, or if explicitly on a login flow, then it's a failure.
-            is_on_search_or_explore = "twitter.com/search" in current_url_lower or \
-                                      "twitter.com/explore" in current_url_lower
-            is_on_login_flow = "twitter.com/i/flow/login" in current_url_lower or \
-                               "login on x" in page_title_lower or "log in to x" in page_title_lower
+            is_on_search_or_explore = ("x.com/search" in current_url_lower or "x.com/explore" in current_url_lower or
+                                         "twitter.com/search" in current_url_lower or "twitter.com/explore" in current_url_lower)
+            is_on_login_flow = ("x.com/i/flow/login" in current_url_lower or
+                                  "twitter.com/i/flow/login" in current_url_lower or
+                                  "login on x" in page_title_lower or "log in to x" in page_title_lower)
 
 
             if not is_on_search_or_explore or is_on_login_flow:
@@ -186,54 +272,55 @@ def scrape_twitter_trends(search_term: str) -> list:
                 error_tracker["page_load"]["error"] = error_message
                 print(f"[ERROR] Page load issue: {error_message}")
                 try:
-                    redirected_page_file = f"debug_redirected_{search_term.replace(' ', '_')}.html"
-                    with open(redirected_page_file, "w", encoding="utf-8") as f:
-                        f.write(driver.page_source)
-                    print(f"[DEBUG] Saved redirected page source to {redirected_page_file}")
-                except Exception as ex_save:
-                    print(f"[ERROR] Could not save redirected page source: {ex_save}")
-                return []
+                    tweet_elements = driver.find_elements(By.XPATH, "//article[@data-testid='tweet']")
+                    print(f"[DEBUG] Found {len(tweet_elements)} tweet elements on page.")
+                except Exception as e:
+                    print(f"[DEBUG] Could not check tweet elements: {str(e)}")
+                save_debug_html(driver.page_source, search_term, attempt, "redirect")
+                attempt += 1
+                continue
             
-            print("[INFO] Successfully loaded a Twitter page, proceeding to check content.")
+            print("[INFO] Successfully loaded search page, proceeding to check content.")
             error_tracker["page_load"]["status"] = "success"
+
 
         except TimeoutException:
             error_tracker["page_load"]["status"] = "failed"
             error_tracker["page_load"]["error"] = "Page load timeout: Key elements (tweets or login) not found."
             print(f"[ERROR] Page load timed out. Current URL: {driver.current_url}, Title: {driver.title}")
-            try:
-                timeout_page_file = f"debug_timeout_{search_term.replace(' ', '_')}.html"
-                with open(timeout_page_file, "w", encoding="utf-8") as f:
-                    f.write(driver.page_source)
-                print(f"[DEBUG] Saved page source on timeout to {timeout_page_file}")
-            except Exception as ex_save:
-                print(f"[ERROR] Could not save page source on timeout: {ex_save}")
-            return []
+            save_debug_html(driver.page_source, search_term, attempt, "timeout")
+            attempt+= 1
+            continue
         except Exception as e:
             error_tracker["page_load"]["status"] = "failed"
             error_tracker["page_load"]["error"] = str(e)
             print(f"[ERROR] Page load failed with exception: {str(e)}. URL: {driver.current_url}")
-            return []
+            attempt+= 1
+            continue
 
-        tweets = []
+        # Scrape Tweets
         seen_tweet_ids = set() # Use a set for efficient lookup of processed tweet IDs
         last_height = driver.execute_script("return document.body.scrollHeight")
         scroll_attempts = 0
-        max_scroll_attempts = 20 # Reduced slightly, adjust as needed
+        max_scroll_attempts = 10 # Reduced slightly, adjust as needed
         consecutive_no_new_tweets_scrolls = 0
         max_consecutive_no_new_tweets = 4 # Be a bit more patient
 
         print("[SCRAPE] Starting to scroll and collect tweets...")
         error_tracker["page_scroll"]["status"] = "in_progress"
 
-        while scroll_attempts < max_scroll_attempts:
+        while scroll_attempts < max_scroll_attempts and requests_made < rate_limit_requests:
             scroll_attempts += 1
+            requests_made += 1
             tweets_found_this_scroll_pass = 0
             try:
                 # Scroll down
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 # Wait for new content to load, or for scroll to take effect
-                time.sleep(random.uniform(2.5, 4.0)) # Randomized wait after scroll
+                time.sleep(random.uniform(3, 5)) # Randomized wait after scroll
+                time.sleep(request_delay)
+                simulate_human_behavior(driver)
+
 
                 error_tracker["tweet_extraction"]["status"] = "in_progress"
                 # XPaths are critical here and highly subject to change by Twitter.
@@ -241,13 +328,9 @@ def scrape_twitter_trends(search_term: str) -> list:
                 articles = driver.find_elements(By.XPATH, "//article[@data-testid='tweet']")
                 
                 if not articles and scroll_attempts == 1: # No articles on first load after successful page_load
-                    print("[WARNING] No tweet articles found immediately after page load. Checking page source.")
-                    # This might indicate an empty search result or a different page structure.
+                    print("[WARNING] No tweet articles found immediately after page load.")
                     # Saving HTML here can be useful.
-                    first_load_no_articles_file = f"debug_no_articles_{search_term.replace(' ', '_')}.html"
-                    with open(first_load_no_articles_file, "w", encoding="utf-8") as f:
-                        f.write(driver.page_source)
-                    print(f"[DEBUG] Saved page source (no articles) to {first_load_no_articles_file}")
+                    save_debug_html(driver.page_source, search_term, attempt, "no_articles")
 
 
                 for article in articles:
@@ -268,8 +351,7 @@ def scrape_twitter_trends(search_term: str) -> list:
                             continue # Already processed this tweet
 
                         tweet_data["id"] = tweet_id
-                    except Exception as e_id:
-                        # print(f"[DEBUG] Minor issue extracting tweet ID: {e_id}")
+                    except Exception:
                         pass # Continue, will try to process without ID or with fallback
 
                     if not tweet_id: # Fallback if ID extraction from URL failed or to ensure uniqueness if ID is missing
@@ -350,6 +432,9 @@ def scrape_twitter_trends(search_term: str) -> list:
                          print(f"[SCRAPE] Scroll height ({new_height}) hasn't changed from last ({last_height}) and no new tweets. Likely end of content.")
                          break
                 last_height = new_height
+                if requests_made >= rate_limit_requests:
+                    print(f"[RATE LIMIT] Reached max requests ({rate_limit_requests}) for this session.")
+                    break
 
             except WebDriverException as e_scroll_wd:
                 print(f"[ERROR] WebDriverException during scroll/extraction: {str(e_scroll_wd)}")
@@ -368,14 +453,38 @@ def scrape_twitter_trends(search_term: str) -> list:
         print(f"[SCRAPE] Scraping phase complete. Found {len(tweets)} potential tweets from {scroll_attempts} scroll attempts.")
 
         # Save final HTML for debugging
+        # Note: file_operations status will be updated by YAML saving. This is just for debug HTML.
         try:
-            # Note: file_operations status will be updated by YAML saving. This is just for debug HTML.
-            final_html_file = f"debug_final_page_{search_term.replace(' ', '_')}.html"
-            with open(final_html_file, "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            print(f"[DEBUG] Saved final page HTML to {final_html_file}")
+            save_debug_html(driver.page_source, search_term, attempt, "final_page")
         except Exception as e_save_final:
             print(f"[ERROR] Failed to save final debug HTML: {str(e_save_final)}")
+
+        # Final deduplication based on text content (your original logic, good as a final pass)
+        if not tweets:
+            error_tracker["deduplication"]["status"] = "skipped"
+            error_tracker["deduplication"]["error"] = "No tweets collected to deduplicate"
+            return []
+        try:
+            error_tracker["deduplication"]["status"] = "in_progress"
+            unique_tweets_final = []
+            seen_texts_final = set()
+            for tweet in tweets:
+                text_content = tweet.get("text", "").strip().lower() # Normalize for deduplication
+                if text_content and text_content not in seen_texts_final:
+                    seen_texts_final.add(text_content)
+                    unique_tweets_final.append(tweet)
+        
+                if len(tweets) != len(unique_tweets_final):
+                    print(f"[DEDUPE] Final text-based deduplication: {len(tweets)} -> {len(unique_tweets_final)} tweets")
+                else:
+                    print(f"[DEDUPE] Final text-based deduplication: No further duplicates found by text from {len(tweets)} tweets.")
+                error_tracker["deduplication"]["status"] = "success"
+                return unique_tweets_final
+        except Exception as e_dedupe_final:
+            print(f"[ERROR] Final deduplication error: {str(e_dedupe_final)}")
+            error_tracker["deduplication"]["status"] = "failed"
+            error_tracker["deduplication"]["error"] = str(e_dedupe_final)
+            return tweets # Return original list if final dedupe fails
 
     except Exception as e_critical:
         print(f"[CRITICAL] Unexpected error in scrape_twitter_trends: {str(e_critical)}")
@@ -384,7 +493,7 @@ def scrape_twitter_trends(search_term: str) -> list:
             if error_tracker.get(step_key, {}).get("status") == "in_progress":
                 error_tracker[step_key]["status"] = "failed"
                 error_tracker[step_key]["error"] = f"Aborted due to critical error: {e_critical}"
-        return []
+        attempt += 1
     finally:
         if driver:
             try:
@@ -392,34 +501,13 @@ def scrape_twitter_trends(search_term: str) -> list:
                 print("[CLEANUP] WebDriver closed successfully")
             except Exception as e_quit:
                 print(f"[WARNING] Error closing WebDriver: {str(e_quit)}")
-    
-    # Final deduplication based on text content (your original logic, good as a final pass)
-    if not tweets:
-        error_tracker["deduplication"]["status"] = "skipped"
-        error_tracker["deduplication"]["error"] = "No tweets collected to deduplicate"
-        return []
 
-    try:
-        error_tracker["deduplication"]["status"] = "in_progress"
-        unique_tweets_final = []
-        seen_texts_final = set()
-        for tweet in tweets:
-            text_content = tweet.get("text", "").strip().lower() # Normalize for deduplication
-            if text_content and text_content not in seen_texts_final:
-                seen_texts_final.add(text_content)
-                unique_tweets_final.append(tweet)
-        
-        if len(tweets) != len(unique_tweets_final):
-            print(f"[DEDUPE] Final text-based deduplication: {len(tweets)} -> {len(unique_tweets_final)} tweets")
-        else:
-            print(f"[DEDUPE] Final text-based deduplication: No further duplicates found by text from {len(tweets)} tweets.")
-        error_tracker["deduplication"]["status"] = "success"
-        return unique_tweets_final
-    except Exception as e_dedupe_final:
-        print(f"[ERROR] Final deduplication error: {str(e_dedupe_final)}")
-        error_tracker["deduplication"]["status"] = "failed"
-        error_tracker["deduplication"]["error"] = str(e_dedupe_final)
-        return tweets # Return original list if final dedupe fails
+    if attempt <= max_retries:
+        print(f"[RETRY] Waiting {request_delay} seconds before retrying...")
+        time.sleep(request_delay)
+
+  print(f"[FAILURE] All {max_retries} attempts failed for '{search_term}'.")
+  return []
 
 # ... (rest of your functions: calculate_relevancy_score, remove_duplicates (which is now integrated), save_to_yaml, display_by_segments, analyze_twitter_trend, __main__)
 # Ensure `remove_duplicates` is either called or its logic is fully integrated.
@@ -430,9 +518,33 @@ def scrape_twitter_trends(search_term: str) -> list:
 # The current `scrape_twitter_trends` function already returns deduplicated (by ID, then by text) tweets.
 # So, the `remove_duplicates` call in `analyze_twitter_trend` might become redundant if this new version is used.
 
+def get_search_term():
+    """
+    Prompt the user for a custom search term or fall back to a random term from SEARCH_TERMS.
+    Returns the selected search term.
+    """
+    try:
+        user_input = input("Enter a custom search term (or press Enter for a random term): ").strip()
+        if user_input:
+            print(f"Using custom search term: '{user_input}'")
+            return user_input
+        else:
+            category = random.choice(list(SEARCH_TERMS.keys()))
+            term = random.choice(SEARCH_TERMS[category])
+            print(f"No custom term provided. Randomly selected search term: '{term}' from category: {category}")
+            return term
+    except Exception as e:
+        print(f"[ERROR] Failed to get search term: {str(e)}. Falling back to random term.")
+        category = random.choice(list(SEARCH_TERMS.keys()))
+        term = random.choice(SEARCH_TERMS[category])
+        print(f"Randomly selected search term: '{term}' from category: {category}")
+        return term
 def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
-    # (Your existing calculate_relevancy_score function - seems okay for its purpose)
-    # ...
+    """
+    Calculate relevancy scores for tweets using TF-IDF and cosine similarity.
+    Returns (tweets with scores, overall trend score).
+    """
+
     error_tracker["nlp_processing"]["status"] = "in_progress"
     
     if not tweets:
@@ -447,13 +559,11 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
         # or instruct users to download it manually once.
         try:
             nltk.data.find('corpora/stopwords')
-        except nltk.downloader.DownloadError:
+        except LookupError:
             print("[NLP] Downloading NLTK stopwords resource...")
             nltk.download("stopwords", quiet=False) # Set quiet=False to see download progress/errors
-        except Exception as e_nltk_find: # Catch other potential errors with find
-            print(f"[NLP_ERROR] Could not verify NLTK stopwords: {e_nltk_find}. Attempting download anyway.")
-            nltk.download("stopwords", quiet=False)
 
+        
         stop_words = set(stopwords.words("english"))
 
         texts = [t.get("text", "") for t in tweets if t.get("text")]
@@ -534,27 +644,23 @@ def save_to_yaml(data: dict, filename: str) -> bool:
     # ...
     # Make sure "file_operations" in error_tracker is correctly managed if multiple file ops occur
     current_op_status = "in_progress" # Reset for this specific operation
-    current_op_error = None
     try:
         # error_tracker["file_operations"]["status"] = "in_progress" # This might overwrite other file ops
         with open(filename, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
         print(f"[FILE] Successfully saved data to {filename}")
         current_op_status = "success"
-        # Update global tracker carefully if this is the primary file op for the step
         if "results.yaml" in filename or "raw.yaml" in filename : # Heuristic for main data files
              error_tracker["file_operations"]["status"] = "success"
         return True
     except Exception as e:
         print(f"[ERROR] Failed to save to {filename}: {str(e)}")
         current_op_status = "failed"
-        current_op_error = str(e)
         if "results.yaml" in filename or "raw.yaml" in filename :
             error_tracker["file_operations"]["status"] = "failed"
             error_tracker["file_operations"]["error"] = str(e)
         return False
-
-
+        
 def display_by_segments(tweets: list) -> None:
     # (Your existing display_by_segments function - seems okay)
     # ...
@@ -566,7 +672,7 @@ def display_by_segments(tweets: list) -> None:
     
     print("\n[RESULTS] Tweets by relevancy segments:")
     any_tweets_displayed = False
-    for title, cond_func in segments.items(): # Use cond_func
+    for title, cond_func in segments.items():
         # Filter tweets that have 'relevancy_score' and meet condition
         group = [t for t in tweets if "relevancy_score" in t and cond_func(t)]
         if not group:
@@ -676,7 +782,7 @@ def analyze_twitter_trend(search_term: str,
         root_cause_error = None
 
         # Define typical pipeline order for finding root cause
-        pipeline_order = ["driver_setup", "page_load", "page_scroll", "tweet_extraction", "deduplication", "nlp_processing", "file_operations"]
+        pipeline_order = ["driver_setup", "page_load", "captcha_detection", "page_scroll", "tweet_extraction", "deduplication", "nlp_processing", "file_operations"]
         
         for step in pipeline_order:
             status_info = error_tracker.get(step) # Use .get for safety
@@ -715,7 +821,7 @@ if __name__ == "__main__":
         print("Twitter Trend Analysis Tool")
         print("==========================")
         
-        term = select_random_search_term()
+        term = get_search_term()
         
         start_time = time.time()
         results = analyze_twitter_trend(term)
