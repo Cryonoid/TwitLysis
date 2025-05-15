@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TwitLysis</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1a1a2e; /* Dark blue-purple */
+            color: #e0e0e0; /* Light grey text */
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            background-color: #162447; /* Darker blue */
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.2); /* Cyan glow */
+            width: 80%;
+            max-width: 700px;
+        }
+        h1 {
+            color: #00ffff; /* Cyan */
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .search-section {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        #searchInput {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #00ffff;
+            border-radius: 5px;
+            background-color: #1f4068; /* Darker input background */
+            color: #e0e0e0;
+        }
+        #searchButton {
+            padding: 10px 15px;
+            background-color: #00ffff; /* Cyan */
+            color: #1a1a2e; /* Dark blue-purple text */
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s ease;
+        }
+        #searchButton:hover {
+            background-color: #00cccc; /* Darker cyan */
+        }
+        .logs-section, .trends-section {
+            margin-top: 20px;
+        }
+        h2 {
+            color: #9bf0e1; /* Light cyan/teal */
+            border-bottom: 1px solid #00ffff;
+            padding-bottom: 5px;
+        }
+        #logsOutput, #trendsOutput {
+            background-color: #12121f; /* Very dark blue */
+            padding: 15px;
+            border-radius: 5px;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #333;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9em;
+            white-space: pre-wrap; /* Preserve whitespace and newlines */
+        }
+        .log-entry { margin-bottom: 5px; }
+        .log-error { color: #ff4d4d; } /* Red for errors */
+        .log-warning { color: #ffcc00; } /* Yellow for warnings */
+        .log-info { color: #80ffff; } /* Lighter cyan for info */
+        .log-debug { color: #cccccc; } /* Grey for debug */
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TwitLysis Interface</h1>
+
+        <div class="search-section">
+            <input type="text" id="searchInput" placeholder="Enter search term or leave blank for random">
+            <button id="searchButton">Search Trends</button>
+        </div>
+
+        <div class="logs-section">
+            <h2>Real-time Logs</h2>
+            <div id="logsOutput">Waiting for logs...</div>
+        </div>
+
+        <div class="trends-section">
+            <h2>Trends Analysis & Insights</h2>
+            <div id="trendsOutput">Trend insights will appear here...</div>
+        </div>
+    </div>
+
+    <script>
+        const searchButton = document.getElementById('searchButton');
+        const searchInput = document.getElementById('searchInput');
+        const logsOutput = document.getElementById('logsOutput');
+        const trendsOutput = document.getElementById('trendsOutput');
+
+        // Basic function to add log messages to the UI
+        function addLog(message, type = 'info') {
+            const logEntry = document.createElement('div');
+            logEntry.classList.add('log-entry');
+            logEntry.classList.add(`log-${type}`); // For styling
+            logEntry.textContent = message;
+            logsOutput.appendChild(logEntry);
+            logsOutput.scrollTop = logsOutput.scrollHeight; // Auto-scroll
+        }
+
+        searchButton.addEventListener('click', async () => {
+            const searchTerm = searchInput.value.trim();
+            logsOutput.innerHTML = ''; // Clear previous logs
+            trendsOutput.innerHTML = 'Fetching trend data...';
+            addLog(`Starting analysis for: ${searchTerm || 'random term'}`);
+
+            // This is where you'd use Fetch API to call your Python backend
+            // For real-time logs, you'd establish an SSE or WebSocket connection.
+            // For simplicity, this example just simulates a call.
+
+            try {
+                // Replace with actual API endpoint
+                // const response = await fetch(`/analyze?term=${encodeURIComponent(searchTerm)}`);
+                // const data = await response.json();
+
+                // --- SIMULATED ---
+                addLog("Simulating backend call...", "debug");
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate delay
+                addLog("[SETUP] Initializing Chrome WebDriver...", "info");
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                addLog("[NETWORK] Accessing URL: https://twitter.com/search?q=...", "info");
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                addLog("[SCRAPE] Starting to scroll and collect tweets...", "info");
+                addLog("[SCRAPE] Scroll 1: Found 5 new tweets. Total: 5", "debug");
+                addLog("[SCRAPE] Scroll 2: Found 3 new tweets. Total: 8", "debug");
+                addLog("[ERROR] Page load timed out.", "error");
+                addLog("[NLP] Calculating TF-IDF vectors...", "info");
+                addLog("[COMPLETE] Analysis finished.", "info");
+                // --- END SIMULATED ---
+
+
+                // Assuming your backend returns data like: { logs: [...], trends: {...} }
+                // For real-time, logs would stream separately.
+                // data.logs.forEach(log => addLog(log.message, log.type));
+                // trendsOutput.textContent = JSON.stringify(data.trends, null, 2);
+
+                trendsOutput.textContent = "Simulated trend data: Topic is highly relevant. Key themes: AI, Future Tech.";
+                addLog("Displaying trends.", "info");
+
+            } catch (error) {
+                addLog(`Error during analysis: ${error}`, "error");
+                trendsOutput.textContent = "Error fetching trends.";
+            }
+        });
+
+        // Example of how you might handle SSE for real-time logs
+        // if (typeof(EventSource) !== "undefined") {
+        //     const source = new EventSource("/stream-logs"); // Your backend endpoint for SSE
+        //     source.onmessage = function(event) {
+        //         const logData = JSON.parse(event.data);
+        //         addLog(logData.message, logData.type);
+        //     };-r
+        //     source.onerror = function(error) {
+        //         addLog("Log stream connection error. Reconnecting...", "error");
+        //         // SSE will attempt to reconnect automatically.
+        //         // You might want to close it if it fails too many times.
+        //     };
+        // } else {
+        //     addLog("Your browser does not support Server-Sent Events for real-time logs.", "warning");
+        // }
+
+    </script>
+</body>
+</html>
