@@ -1,6 +1,24 @@
-selenium==4.9.1
-beautifulsoup4==4.12.2
-PyYAML==6.0.2
+# Web framework and drivers
+flask==2.0.1
+werkzeug==2.0.1  # Pin Werkzeug version to match Flask 2.0.1
+selenium==4.10.0
+webdriver-manager==3.8.6
+gunicorn==20.1.0
+
+# NLP processing
 nltk==3.8.1
 scikit-learn==1.2.2
-webdriver-manager==3.8.6
+numpy>=1.22.0
+scipy>=1.8.0
+
+# HTML parsing and data handling
+beautifulsoup4>=4.12.2
+# Use binary wheel for PyYAML to avoid build issues
+pyyaml==6.0.1 --only-binary :all:
+
+# Windows-specific dependencies
+pywin32>=306.0; sys_platform == 'win32'
+
+# Add troubleshooting packages
+wheel>=0.42.0
+setuptools>=69.0.2

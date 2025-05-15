@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TwitLysis - Twitter Trend Analysis</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <!-- Add Font Awesome for Twitter-like icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <!-- Chart.js for better visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo-area">
+                <i class="fab fa-twitter twitter-logo"></i>
+                <h1>TwitLysis</h1>
+            </div>
+            <p class="subtitle">Real-time Twitter Trend Analysis</p>
+        </header>
+
+        <section id="search-section">
+            <h2><i class="fas fa-search"></i> Search Tweets</h2>
+            <div class="input-group">
+                <input type="text" id="search-query" placeholder="Enter search term (e.g. AI, Politics, Bitcoin)">
+                <button id="search-button">Analyze</button>
+            </div>
+            <div id="search-status" class="search-status"></div>
+            <div id="progress-container" class="progress-container" style="display: none;">
+                <div id="progress-bar" class="progress-bar"></div>
+                <div id="progress-text">Processing...</div>
+            </div>
+        </section>
+
+        <section id="output-section">
+            <h2><i class="fas fa-stream"></i> Live Output</h2>
+            <div id="live-output" class="output-box">
+                <p>Search output will appear here in real-time...</p>
+            </div>
+        </section>
+
+        <section id="results-section">
+            <h2><i class="fas fa-history"></i> Recent Results</h2>
+            <div class="results-list" id="results-list">
+                <div class="loading-spinner">
+                    <i class="fas fa-spinner fa-spin"></i> Loading previous results...
+                </div>
+            </div>
+        </section>
+
+        <section id="trends-section">
+            <h2><i class="fas fa-chart-line"></i> Trend Analysis & Insights</h2>
+            
+            <div class="tabs">
+                <button class="tab-button active" data-tab="overall-tab">Overall Trends</button>
+                <button class="tab-button" data-tab="selected-tab">Selected Term Analysis</button>
+                <button class="tab-button" data-tab="hashtags-tab">Popular Hashtags</button>
+            </div>
+            
+            <div id="overall-tab" class="tab-content active">
+                <div class="card">
+                    <h3>Top Trends (Search Terms)</h3>
+                    <ul id="top-trends-list" class="trend-list"></ul>
+                </div>
+                
+                <!-- Removed pie chart for overall sentiment distribution -->
+            </div>
+            
+            <div id="selected-tab" class="tab-content">
+                <div class="term-selector">
+                    <label for="term-select">Select a search term:</label>
+                    <select id="term-select">
+                        <option value="">-- Select a term --</option>
+                    </select>
+                </div>
+                
+                <div id="selected-term-details" class="term-details">
+                    <div class="card">
+                        <h3>Sentiment Analysis</h3>
+                        <div class="chart-container">
+                            <canvas id="selected-sentiment-chart"></canvas>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>Top Tweets</h3>
+                        <div id="selected-tweets" class="tweet-list"></div>
+                    </div>
+                </div>
+                
+                <div id="no-term-selected" class="no-selection">
+                    <p><i class="fas fa-info-circle"></i> Select a term from the dropdown to view detailed analysis</p>
+                </div>
+            </div>
+            
+            <div id="hashtags-tab" class="tab-content">
+                <div class="card">
+                    <h3>Popular Hashtags</h3>
+                    <div class="hashtag-cloud" id="hashtag-cloud"></div>
+                </div>
+                
+                <div class="card">
+                    <h3>Trending Hashtags</h3>
+                    <div class="chart-container">
+                        <canvas id="hashtag-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <div class="footer-links">
+                <a href="#"><i class="fas fa-home"></i> Home</a>
+                <a href="#"><i class="fas fa-info-circle"></i> About</a>
+                <a href="#"><i class="fas fa-question-circle"></i> Help</a>
+            </div>
+            <p>Twitter Trend Analysis Tool &copy; 2024</p>
+        </footer>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

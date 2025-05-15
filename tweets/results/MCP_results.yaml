@@ -1,0 +1,284 @@
+trend_relevancy: 11
+search_term: MCP
+tweets_count: 40
+tweets:
+- id: '1922481465180238040'
+  text: mcp when
+  username: '@tertirtur'
+  hashtags: []
+  relevancy_score: 100
+- id: '1922482460538917161'
+  text: Hypermedia is MCP from before MCP.
+  username: '@devinbgoble'
+  hashtags: []
+  relevancy_score: 54
+- id: '1922481929913278727'
+  text: 'ChatGPT 也要支持添加 MCP 了
+
+
+    看起来也支持远程 MCP，不支持 Stdio 方式'
+  username: '@op7418'
+  hashtags: []
+  relevancy_score: 25
+- id: '1922484992141361593'
+  text: "我们 \n@MistTrack_io\n 自己的 MCP 上线测试中，目前体验效果还不错，使用有门槛：\n\n1 你本地得有 Claude/Cursor\
+    \ 等支持 MCP 的客户端，参考：https://mcp.so/server/misttrackmcp/slowmist?tab=content…\n2\
+    \ 你需要 MistTrack API Key，需要付费：https://misttrack.io/pricing.html\n\n然后，你就可以用自然语言给这个整合了\
+    \ MistTrack MCP 的 AI"
+  username: '@evilcos'
+  hashtags: []
+  relevancy_score: 21
+- id: '1922486666373017975'
+  text: "アイデアメモ \n外部通信機能 to MCP クライアント"
+  username: '@t_furu'
+  hashtags: []
+  relevancy_score: 18
+- id: '1922484618365722812'
+  text: 'OpenMemory MCP 这个工具好啊
+
+
+    将你需要的 AI 记录的内容都存在本地，然后共享给所有支持 MCP 的客户端
+
+
+    这样你的 Cluade、Cursor、Windsurf 都可以读取相关信息了
+
+
+    只需要维护一份记忆内容就行'
+  username: '@op7418'
+  hashtags: []
+  relevancy_score: 18
+- id: '1922483335231640059'
+  text: Register Now For Our AMA On MCP + Agents With Leaders In The Space!
+  username: '@KyeGomezB'
+  hashtags: []
+  relevancy_score: 15
+- id: '1922478656317747652'
+  text: Tripo MCP の写真から 3D モデルを作る機能、おもしろい
+  username: '@tily'
+  hashtags: []
+  relevancy_score: 14
+- id: '1922482794019655698'
+  text: Ambiri amene timadana ndi mcp tili theba.
+  username: '@Zooflowz98'
+  hashtags: []
+  relevancy_score: 13
+- id: '1922482915717611944'
+  text: "New AMA : From Plugins to Protocols:  Why MCP Is the Future of Agent Capabilities\
+    \  \n\nLearn how MCP is revolutionizing agent-tool integration and why it has\
+    \ captured the industry's attention in our latest AMA. We'll clearly explain the\
+    \ protocol, showcase real-world applications,"
+  username: '@swarms_corp'
+  hashtags: []
+  relevancy_score: 12
+- id: '1922479605619011703'
+  text: "要你命三千， Agent + Tools 版本\n\nhttps://github.com/aipotheosis-labs/aci…\n- http://ACI.dev\
+    \ \n\n是一個開源平台，能讓你的 AI 代理程式連結到 600 多種工具整合。\n- 提供多租戶驗證、細緻的權限控制，以及透過直接函式呼叫或統一的 MCP\
+    \ 伺服器來存取。\n- 支援多種存取方式，包含統一 MCP 伺服器和輕量級"
+  username: Evan Lin@LINE DevRel
+  hashtags: []
+  relevancy_score: 12
+- id: '1922480819672908001'
+  text: 'Visual Studio 2022 v17.14 正式发布，新增代理模式、MCP 支持等 '
+  username: '@windiscoverfeed'
+  hashtags: []
+  relevancy_score: 11
+- id: '1922486428610560096'
+  text: 'yeah started this week. Pretty good so far. You can use mcp, check out this
+    section in readme:'
+  username: '@FerBarroso95'
+  hashtags: []
+  relevancy_score: 10
+- id: '1922482698863448542'
+  text: So basically, MCP is like the WiFi for LLMs and A2A is the group chat nobody
+    asked for
+  username: '@HuyNinh955'
+  hashtags: []
+  relevancy_score: 10
+- id: '1922486866005082339'
+  text: Getting this non-stop with Windsurf - what's going on? Not using any MCP servers
+    besides taskmaster - and this was already happening without it enabled.
+  username: '@chongdashu'
+  hashtags: []
+  relevancy_score: 9
+- id: '1922486971374432625'
+  text: "私有 AI 記憶層來了：\n  \n- 為 MCP 客戶端提供共享記憶  \n- 記憶操作標準化如 add/search/delete  \n-\
+    \ 全本地儲存，無雲端依賴  \n- 控制面板集中管理與可視化  \n- Docker 快速部署，無供應商綁定"
+  username: '@minghua6699'
+  hashtags: []
+  relevancy_score: 8
+- id: '1922478783136956842'
+  text: 'Multi-agent Deep Researcher that combines LLMs with specialized tools for
+    web search, crawling, and Python code execution using MCP.
+
+
+    100% Opensource.'
+  username: '@Saboo_Shubham_'
+  hashtags: []
+  relevancy_score: 8
+- id: '1922485274757476710'
+  text: "Excited to co-host a Space with \n@swarms_corp\n , \n@APRO_Oracle\n , \n\
+    @TrustaLabs\n , and \n@PhalaNetwork\n!\n\nWe’ll be sharing the latest on MCP tech\
+    \ advancements and the future plans for DeMCP.\n\nStay tuned — you won’t want\
+    \ to miss it!"
+  username: '@DeMCP_AI'
+  hashtags: []
+  relevancy_score: 7
+- id: '1922485202141773953'
+  text: " AI Alpha - $#1 Trending Baby Name - \n CA - PERNiqh1NNpD6zpBjGcdQYvgzKxG72Ym8oihhKSpump\
+    \ \n MCP - 40.35K \n Signal  Check Analyze  https://Gmgn.ai/sol/token/B5A6oken/B5A6Y4P5_PERNiqh1NNpD6zpBjGcdQYvgzKxG72Ym8oihhKSpump…\n\
+    - Axiom found a new unlock on transaction speed -"
+  username: '@Clarabellatai'
+  hashtags: []
+  relevancy_score: 7
+- id: '1922481089429348424'
+  text: " Update DEXScreener \n\n⊢Token⎼ chillcoin\n⊢CA⎼ 3mR86S92HuQuU1PgN7YPMRiBWvzMcGJo6i1Yir37pump\n\
+    ⊢MCP⎼ 68.1K\n⊢TOP 10⎼ N/A\n\n Signal & Fast Trading  https://Gmgn.ai/sol/token/B5A6oken/B5A6Y4P5_3mR86S92HuQuU1PgN7YPMRiBWvzMcGJo6i1Yir37pump…\n\
+    \ - Get personalized trading insights - "
+  username: '@IchtsanA'
+  hashtags: []
+  relevancy_score: 7
+- id: '1922479673344209076'
+  text: " Update DEXScreener \n\n⊢Token⎼ fatpig\n⊢CA⎼ 2qH64K6oFDzTYHMeMFAoGiu3NTGf5PedBuKfrSvDbonk\n\
+    ⊢MCP⎼ 156.1K\n⊢TOP 10⎼ N/A\n\n Signal & Fast Trading  https://Gmgn.ai/sol/token/B5A6oken/B5A6Y4P5_2qH64K6oFDzTYHMeMFAoGiu3NTGf5PedBuKfrSvDbonk…\n\
+    \ - Hold space and use hotkeys for instant trades - "
+  username: '@Bar3bear4'
+  hashtags: []
+  relevancy_score: 7
+- id: '1922478969238007933'
+  text: "Ever asked AI for domain name ideas to find out they’re not available?\n\n\
+    It’s frustrating! \n\nI’ve been there myself. \n\nSo I set out to change it.\n\
+    \nBy creating a MCP server.\n\nWould you do me a favor and try it out?\n\nhttps://tldmcp.com"
+  username: '@jordankdalton'
+  hashtags: []
+  relevancy_score: 7
+- id: '1922478913726361862'
+  text: "I'm not yet convinced on most of the Agent memory products I see out there.\
+    \ \n\nI understand the premise but in practice LLMs aren't very good at storing\
+    \ or retrieving things from memory. Especially not as a MCP server that requires\
+    \ them to \"consciously\" use it."
+  username: '@DennisonBertram'
+  hashtags: []
+  relevancy_score: 7
+- id: '1922486867275960581'
+  text: " Just In: 23 KOLs have aped into #BABYION!  \n\n MCP: $146.3K  \n Liq: 270.22\
+    \ SOL ($92.6K 100%)  \n Holders: 1002  \n\nExciting times ahead! Check it out:\
+    \  \nhttps://gmgn.ai/sol/token/rLkfkJiz_GQ5BCLCcJGkwCanLv8aeHfh2ZGjGotZsvnNJUZQFGiGo…\
+    \  \n\nKOLS: \n@ihateoop\n @HunterOnlyETH\n @Richinsilencd\n @Loong998\n @Blackmong77\n\
+    \ @K99eth\n @Irfartworld\n …"
+  username: '@gmgnalerts'
+  hashtags:
+  - '#BABYION'
+  relevancy_score: 6
+- id: '1922486830122820005'
+  text: " Just In! 22 KOLs aped into #BABYION!   \n MCP: $179.4K  \n Liquidity: 292.7\
+    \ SOL ($100.3K 100%)  \n Holders: 1072  \n\nCheck it out here:  \nhttps://gmgn.ai/sol/token/rLkfkJiz_GQ5BCLCcJGkwCanLv8aeHfh2ZGjGotZsvnNJUZQFGiGo…\
+    \  \n\nShoutout to our KOLs: \n@Blackmong77\n, \n@Richinsilencd\n, \n@K99eth\n\
+    , \n@Irfartworld\n, \n@x1aotiaodeye\n, \n@sakakimay1995\n, …"
+  username: '@gmgnalerts'
+  hashtags:
+  - '#BABYION'
+  relevancy_score: 6
+- id: '1922486774405660882'
+  text: " Just in! 28 KOLs have aped into #Dazhuang!   \n MCP: $1.1M  \n Liquidity:\
+    \ 379.07 SOL ($129.8K)  \n Holders: 2050  \n\nCheck it out here:  \nhttps://gmgn.ai/sol/token/rLkfkJiz_EmoNk76Psbz4k1DpePgyFmZX3Wkv3RDfo8tGX9cbonk…\
+    \  \n\nShoutout to \n@K99eth\n, \n@btc_Canary\n, \n@_pogai_\n, \n@Web33Jey\n,\
+    \ \n@btcbears\n, \n@xiaohei_ren\n, \n@Dior100x\n, \n@hhh666xx\n, \n@cas\n…"
+  username: '@gmgnalerts'
+  hashtags:
+  - '#Dazhuang'
+  relevancy_score: 6
+- id: '1922481123877085637'
+  text: "I built an AI Agent with \n@mastra_ai\n that helps you decide if you should\
+    \ move to SF or NYC. \n\nIt's got access to some MCP servers and APIs to do some\
+    \ research.\n\nI didn't tell it anything about my preferences, used gpt-4o, and\
+    \ bullied it into deciding for me.\n\nNYC >>>> SF"
+  username: '@vtahowe'
+  hashtags: []
+  relevancy_score: 6
+- id: '1922480527375769904'
+  text: " BIG NEWS! 25 KOLs just aped into #Dazhuang!   \nMCP: $1.3M  \nLiquidity:\
+    \ 397.4 SOL ($136.4K 100%)  \nHolders: 1962  \n Check it out: https://gmgn.ai/sol/token/rLkfkJiz_EmoNk76Psbz4k1DpePgyFmZX3Wkv3RDfo8tGX9cbonk…\
+    \  \n\nShoutout to the KOLs: \n@hhh666xx\n, \n@Dior100x\n, \n@btcbears\n, \n@Web33Jey\n\
+    , \n@bencongQKL\n, \n@caizhu_88\n, \n@sakakimay1995\n, @btc_C…"
+  username: '@gmgnalerts'
+  hashtags:
+  - '#Dazhuang'
+  relevancy_score: 6
+- id: '1922480510208508405'
+  text: "- A SWE\n- better advanced voice\n- MCP support\n- Expanded canvas functionality:\
+    \ version control, deployment options\n- screen sharing on web and desktop \n\
+    - operator 2 (integrated into o3/o4 CoT)\n- sora updates"
+  username: '@k_kohlbrenner'
+  hashtags: []
+  relevancy_score: 6
+- id: '1922486222850592951'
+  text: 'MCPサーバー経由でデータの書き込み・更新・削除を許可したらSalesforceとかのデータめちゃくちゃにならないのかな？
+
+
+    その辺は心配だけど、本当に書いてある通りならかなりすごいリリースだと思う'
+  username: '@m2ai_jp'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922484661369921669'
+  text: Este siempre vendiendo humo nunca tiene ni para nada de lo que dice ver y
+    tener
+  username: '@lautarodorrego2'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922484334671364437'
+  text: "OpenMemory MCPで管理するメモリーは全てローカルのDocker（ \n@qdrant_engine\n ）に格納されるので安心。Dockerさえあれば簡単に実装できるのでぜひ試してほしい。巷で話題のMCPサーバーが体験できるのもなおいい。"
+  username: '@gijigae'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922484289100243370'
+  text: 'この手の話題って「それ人間にも言えるよね？」が最近本当に多い。
+
+    人間も知らなくても「知ってます」といって後で勉強したりする。そういう人間の作った文章を素に「確率的」に生成される文字を連続出力するものが生成AIです。
+
+    最近はMCPやRAG等が出てきたので「この中になければわかりません」が可能'
+  username: くーかい@株
+  hashtags: []
+  relevancy_score: 0
+- id: '1922481764980981938'
+  text: 「Visual Studio 2022」v17.14が一般公開 ～今後は毎月リリース、次期版の開発も始動／「GitHub Copilot」エージェントモードやMCP対応がプレビュー
+    https://forest.watch.impress.co.jp/docs/news/2013844.html…
+  username: '@madonomori'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922481100074496417'
+  text: 'FJw
+
+    ية يستمع بإ
+
+    ▬ك&#x624;ب&#x624;ن▬ك&#x648;د▬خ&#x635;م▬جينى▬جيني▬جني▬تو&#x64A;و▬تو▬&#x64A;و▬دبدوب▬'
+  username: '@RichardMcp8307'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922480957044473871'
+  text: エピソードも話のわかりやすさ説明も、ステキすぎ
+  username: '@U0nzqw3tMCP5scm'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922480695911313646'
+  text: MCPだとAIエージェント介して対話的に処理ができるので、デモも近未来的で面白い。現状rootipの開発レベルだとAIエージェントはOpenAIのAPIラッパーをpythonで書いてるんですが、そのうちChatGPT/Claudeが直接繋げるようにしてくれるでしょう。
+  username: '@akihito_okura'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922479576522891560'
+  text: 温暖化しているのは脳みその方であって、もっと冷静な客観的な視点こそが大事かなあとか思います。
+  username: '@U0nzqw3tMCP5scm'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922479478514843966'
+  text: "今週のはてなブログランキング〔2025年5月第2週〕より、おすすめエントリーを紹介します\n\n比較的安全にMCPサーバを動かす - LIFULL\
+    \ Creators Blog\n\nhttps://lifull.blog/entry/2025/05/08/170000…\n\nLIFULL Developer\
+    \ \n@lifulldeveloper\n さん"
+  username: '@hatenablog'
+  hashtags: []
+  relevancy_score: 0
+- id: '1922478779349295544'
+  text: Se esse tipo de conteúdo chegou fora da bolha, pode ter certeza que eles são
+    famosos o suficiente na bolha deles
+  username: '@NatanEm34720331'
+  hashtags: []
+  relevancy_score: 0
