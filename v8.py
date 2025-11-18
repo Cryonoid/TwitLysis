@@ -322,7 +322,7 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
     driver = None
     attempt = 1
     tweets = []
-    rate_limit_requests = 5
+    rate_limit_requests = 10
     requests_made = 0
 
     while attempt <= max_retries:
@@ -510,7 +510,7 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             seen_tweet_ids = set()
             last_height = driver.execute_script("return document.body.scrollHeight")
             scroll_attempts = 0
-            max_scroll_attempts = 3  # Reduced to minimize detection
+            max_scroll_attempts = 5 # Reduced to minimize detection
             consecutive_no_new_tweets_scrolls = 0
             max_consecutive_no_new_tweets = 3
 
