@@ -3,18 +3,20 @@ import random
 import traceback
 import json
 import os
+import shutil
+import zipfile
+import urllib.request
 from datetime import datetime
 from bs4 import BeautifulSoup
 import yaml
 import nltk
-nltk.data.path.append('/home/flip1/nltk_data')
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException
+from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException, SessionNotCreatedException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
@@ -35,6 +37,7 @@ error_tracker = {
     "deduplication": {"status": "not_started", "error": None},
     "file_operations": {"status": "not_started", "error": None},
     "captcha_detection": {"status": "not_started", "error": None},
+    "auth_verification": {"status": "not_started", "error": None},
 }
 
 SEARCH_TERMS = {
@@ -55,41 +58,139 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
 ]
 
+def pick_random_search_term() -> str:
+    """Pick a random term from SEARCH_TERMS categories."""
+    categories = list(SEARCH_TERMS.keys())
+    if not categories:
+        return "AI"
+    category = random.choice(categories)
+    terms = SEARCH_TERMS.get(category) or []
+    if not terms:
+        return "AI"
+    term = random.choice(terms)
+    print(f"[INFO] Auto-selected search term from '{category}': {term}")
+    return term
+
 def load_cookies(config_file="twitter_cookies.json"):
     """
-    Load cookies from a JSON file for authentication.
-    Expected format: {"auth_token": "your_auth_token"}
+    Load auth cookies from environment first, then fall back to the JSON cookie file.
     """
     try:
+        env_token = os.getenv("TWITTER_AUTH_TOKEN")
+        env_ct0 = os.getenv("TWITTER_CT0")
+        if env_token:
+            print("[DEBUG] Using auth cookies from environment variables.")
+            return {
+                "auth_token": env_token.strip(),
+                "ct0": env_ct0.strip() if env_ct0 else None,
+            }
+
         if os.path.exists(config_file):
-            with open(config_file, "r") as f:
+            with open(config_file, "r", encoding="utf-8") as f:
                 cookies = json.load(f)
-            auth_token = cookies.get("auth_token", None)
+
+            auth_token = cookies.get("auth_token")
+            ct0 = cookies.get("ct0")
             if not auth_token:
-                print("[WARNING] No auth_token found in cookie file.")
+                print(f"[WARNING] No auth_token found in {config_file}")
                 return None
-            print("[DEBUG] Auth token loaded successfully.")
-            return auth_token
-        else:
-            print(f"[WARNING] Cookie file {config_file} not found.")
-            return None
-    except Exception as e:
-        print(f"[ERROR] Failed to load cookies: {str(e)}")
+
+            print(f"[DEBUG] Auth token loaded successfully from {config_file}.")
+            return {
+                "auth_token": str(auth_token).strip(),
+                "ct0": str(ct0).strip() if ct0 else None,
+            }
+
+        print(f"[WARNING] Cookie file {config_file} not found.")
         return None
+    except Exception as e:
+        print(f"[ERROR] Failed to load cookies from {config_file}: {str(e)}")
+        return None
+
+def _is_login_or_challenge_page(driver):
+    """Return (is_login_or_challenge, reason) based on URL/title/DOM markers."""
+    try:
+        current_url_lower = driver.current_url.lower()
+        page_title_lower = driver.title.lower()
+
+        if "x.com/i/flow/login" in current_url_lower or "twitter.com/i/flow/login" in current_url_lower:
+            return True, "login_flow_url"
+        if "login on x" in page_title_lower or "log in to x" in page_title_lower:
+            return True, "login_page_title"
+        if "x.com/account/access" in current_url_lower or "x.com/i/flow" in current_url_lower:
+            return True, "access_or_flow_interstitial"
+
+        login_inputs = [
+            (By.XPATH, "//input[@name='session[username_or_email]']"),
+            (By.XPATH, "//input[@autocomplete='current-password']"),
+            (By.XPATH, "//a[contains(@href, '/i/flow/login')]")
+        ]
+        for by, locator in login_inputs:
+            if driver.find_elements(by, locator):
+                return True, "login_dom_marker"
+
+        return False, "not_login_or_challenge"
+    except Exception:
+        return False, "check_failed"
+
+def verify_authenticated_session(driver, search_term, attempt, log_fn):
+    """
+    Verify login state immediately after cookie injection to avoid false scraper failures.
+    """
+    try:
+        log_fn("[AUTH] Verifying authenticated session state before search navigation...")
+        driver.get("https://x.com/home")
+        time.sleep(random.uniform(2.5, 4.5))
+
+        login_or_challenge, reason = _is_login_or_challenge_page(driver)
+        if login_or_challenge:
+            save_debug_html(driver.page_source, search_term, attempt, f"auth_failed_{reason}")
+            return False, f"Authentication not active after cookie apply ({reason})."
+
+        logged_in_markers = [
+            (By.XPATH, "//a[@data-testid='AppTabBar_Home_Link']"),
+            (By.XPATH, "//button[@data-testid='SideNav_AccountSwitcher_Button']"),
+            (By.XPATH, "//a[contains(@href, '/compose/post') or contains(@href, '/compose/tweet')]")
+        ]
+
+        marker_found = False
+        for by, locator in logged_in_markers:
+            if driver.find_elements(by, locator):
+                marker_found = True
+                break
+
+        if not marker_found:
+            save_debug_html(driver.page_source, search_term, attempt, "auth_uncertain")
+            return False, "Could not confirm logged-in UI markers after cookie apply."
+
+        log_fn("[AUTH] Session verification passed.")
+        return True, "verified"
+    except Exception as e:
+        save_debug_html(driver.page_source, search_term, attempt, "auth_check_exception")
+        return False, f"Auth verification error: {str(e)}"
 
 def save_debug_html(content, search_term, attempt, reason):
     """
-    Save debug HTML with metadata for improved debugging.
+    Save debug HTML files inside the debug_html directory only.
     """
     try:
+        debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_html")
+        os.makedirs(debug_dir, exist_ok=True)
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"debug_{reason}_{search_term.replace(' ', '_')}_attempt{attempt}_{timestamp}.html"
-        metadata = f"<!-- Debug Info: Search Term: {search_term}, Attempt: {attempt}, Reason: {reason}, Timestamp: {timestamp} -->\n"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(metadata + content)
-        print(f"[DEBUG] Saved debug HTML to {filename}")
+        safe_term = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(search_term))
+        safe_reason = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(reason))
+        filename = f"{safe_reason}_{safe_term}_attempt{attempt}_{timestamp}.html"
+        file_path = os.path.join(debug_dir, filename)
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        print(f"[DEBUG] Saved debug HTML to {file_path}")
+        return file_path
     except Exception as e:
         print(f"[ERROR] Failed to save debug HTML: {str(e)}")
+        return None
 
 def detect_captcha(driver):
     """
@@ -192,6 +293,133 @@ def get_chrome_version():
         # Return a safe version that has good ChromeDriver compatibility
         return "114.0.5735.90"
 
+
+
+def get_chrome_major_version(version_string: str) -> int:
+    """Return major version number from a browser version string."""
+    try:
+        return int(str(version_string).split(".")[0])
+    except Exception:
+        return 0
+
+def _path_without_chromedriver(path_value: str) -> str:
+    """Return PATH with directories containing chromedriver removed."""
+    if not path_value:
+        return path_value
+    driver_name = "chromedriver.exe" if os.name == "nt" else "chromedriver"
+    cleaned = []
+    for entry in path_value.split(os.pathsep):
+        candidate = os.path.join(entry, driver_name)
+        if os.path.exists(candidate):
+            continue
+        cleaned.append(entry)
+    return os.pathsep.join(cleaned)
+
+def _platform_key_for_cft() -> str:
+    """Return Chrome-for-Testing platform key for current OS."""
+    if os.name == "nt":
+        return "win64"
+    if os.uname().sysname.lower() == "darwin":
+        # Keep x64 default for compatibility with current setup.
+        return "mac-x64"
+    return "linux64"
+
+def _version_key(version_str: str):
+    """Comparable key for dotted numeric versions."""
+    try:
+        return tuple(int(p) for p in version_str.split("."))
+    except Exception:
+        return (0,)
+
+def _get_or_download_matching_chromedriver(chrome_major: int, log_fn=None):
+    """
+    Download a matching ChromeDriver from Chrome-for-Testing for the given major version.
+    Returns local executable path or None.
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    if chrome_major <= 0:
+        return None
+
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    cache_dir = os.path.join(project_root, "drivers", "chromedriver", str(chrome_major))
+    os.makedirs(cache_dir, exist_ok=True)
+
+    exe_name = "chromedriver.exe" if os.name == "nt" else "chromedriver"
+    cached_exe = os.path.join(cache_dir, exe_name)
+    if os.path.exists(cached_exe):
+        _log(f"[SETUP] Using cached matching ChromeDriver: {cached_exe}")
+        return cached_exe
+
+    index_url = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+    _log("[SETUP] Fetching Chrome-for-Testing driver index...")
+
+    try:
+        with urllib.request.urlopen(index_url, timeout=30) as response:
+            index_data = json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        _log(f"[WARNING] Could not fetch Chrome-for-Testing index: {str(e)}")
+        return None
+
+    versions = index_data.get("versions", [])
+    prefix = f"{chrome_major}."
+    candidates = [v for v in versions if str(v.get("version", "")).startswith(prefix)]
+    if not candidates:
+        _log(f"[WARNING] No Chrome-for-Testing driver entry found for Chrome major {chrome_major}.")
+        return None
+
+    candidates.sort(key=lambda x: _version_key(str(x.get("version", "0"))))
+    selected = candidates[-1]
+    selected_version = selected.get("version", "unknown")
+
+    platform_key = _platform_key_for_cft()
+    downloads = selected.get("downloads", {}).get("chromedriver", [])
+    item = next((d for d in downloads if d.get("platform") == platform_key), None)
+    if not item:
+        _log(f"[WARNING] No ChromeDriver download for platform '{platform_key}' in version {selected_version}.")
+        return None
+
+    zip_url = item.get("url")
+    if not zip_url:
+        _log("[WARNING] Missing ChromeDriver download URL in Chrome-for-Testing index.")
+        return None
+
+    zip_path = os.path.join(cache_dir, f"chromedriver_{selected_version}_{platform_key}.zip")
+    _log(f"[SETUP] Downloading ChromeDriver {selected_version} from Chrome-for-Testing...")
+
+    try:
+        urllib.request.urlretrieve(zip_url, zip_path)
+    except Exception as e:
+        _log(f"[WARNING] Failed downloading ChromeDriver zip: {str(e)}")
+        return None
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            members = archive.namelist()
+            target = next((m for m in members if m.endswith(exe_name)), None)
+            if not target:
+                _log("[WARNING] Downloaded zip does not contain chromedriver executable.")
+                return None
+            archive.extract(target, cache_dir)
+            extracted = os.path.join(cache_dir, target)
+
+        # Move executable to stable location for reuse.
+        shutil.move(extracted, cached_exe)
+
+        # Best-effort cleanup of extracted folders and zip.
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+
+        _log(f"[SETUP] Downloaded matching ChromeDriver to: {cached_exe}")
+        return cached_exe
+    except Exception as e:
+        _log(f"[WARNING] Failed to extract ChromeDriver zip: {str(e)}")
+        return None
+
 def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
     """
     Calculate relevancy scores for tweets using TF-IDF and cosine similarity.
@@ -211,7 +439,7 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
             nltk.data.find('corpora/stopwords')
         except LookupError:
             print("[NLP] Downloading NLTK stopwords resource...")
-            nltk.download("stopwords", quiet=False)
+            nltk.download("stopwords", quiet=True)
 
         stop_words = set(stopwords.words("english"))
 
@@ -307,6 +535,32 @@ def save_to_yaml(data: dict, filename: str, is_raw: bool = False) -> bool:
             error_tracker["file_operations"]["error"] = str(e)
         return False
 
+def build_failure_summary() -> str:
+    """Return a compact failure summary with the first failed step as likely root cause."""
+    ordered_steps = [
+        "driver_setup",
+        "auth_verification",
+        "page_load",
+        "captcha_detection",
+        "page_scroll",
+        "tweet_extraction",
+        "deduplication",
+        "nlp_processing",
+        "file_operations",
+    ]
+    failed = []
+    for step in ordered_steps:
+        state = error_tracker.get(step, {})
+        if state.get("status") == "failed":
+            failed.append((step, state.get("error") or "unknown error"))
+
+    if not failed:
+        return "No explicit failed step recorded. Check debug_html snapshots for runtime context."
+
+    root_step, root_error = failed[0]
+    details = "; ".join([f"{step}: {err}" for step, err in failed])
+    return f"Root cause: {root_step} -> {root_error}. Failed steps: {details}"
+
 def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, progress_callback=None) -> list:
     """
     Scrape tweets related to the search term from X with enhanced anti-ban features.
@@ -349,36 +603,68 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
 
             # Try multiple strategies to initialize the Chrome WebDriver
             driver_initialized = False
-            
-            # Strategy 1: Using WebDriverManager with specific Chrome version
-            if not driver_initialized:
+            chrome_version = get_chrome_version()
+            chrome_major = get_chrome_major_version(chrome_version)
+            log(f"[SETUP] Detected Chrome version: {chrome_version} (major={chrome_major})")
+
+            # For Chrome 115+, avoid webdriver-manager/local-driver fallback because they often
+            # pin to stale binaries and cause session mismatch errors on newer Chrome.
+            if chrome_major >= 115 and not driver_initialized:
+                original_path = os.environ.get("PATH", "")
                 try:
-                    log("[SETUP] Trying webdriver_manager with specific Chrome version...")
-                    chrome_version = get_chrome_version()
-                    log(f"[SETUP] Detected Chrome version: {chrome_version}")
-                    
-                    from webdriver_manager.chrome import ChromeDriverManager
-                    service = Service(ChromeDriverManager(chrome_type=chrome_version).install())
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    log("[SETUP] Chrome >=115 detected; forcing Selenium Manager direct initialization...")
+                    if os.path.exists("chromedriver.exe"):
+                        log("[WARNING] Found ./chromedriver.exe in project root; this can force an incompatible driver.")
+                        log("[HINT] Remove or rename local chromedriver.exe to allow Selenium Manager to resolve a matching version.")
+                    detected_local = shutil.which("chromedriver")
+                    if detected_local:
+                        log(f"[SETUP] Found local chromedriver in PATH: {detected_local}")
+                        log("[SETUP] Temporarily removing chromedriver directories from PATH for this launch.")
+                    os.environ["PATH"] = _path_without_chromedriver(original_path)
+                    driver = webdriver.Chrome(options=chrome_options)
                     driver_initialized = True
-                    log("[SETUP] Chrome WebDriver initialized successfully with specific version.")
+                    log("[SETUP] Selenium Manager direct initialization succeeded.")
+                except SessionNotCreatedException as e:
+                    log(f"[WARNING] Direct init session mismatch: {str(e)}")
+                    log("[HINT] Trying Chrome-for-Testing fallback with an exact matching driver...")
                 except Exception as e:
-                    log(f"[WARNING] Failed to initialize with specific Chrome version: {str(e)}")
-            
-            # Strategy 2: Using WebDriverManager with default settings
-            if not driver_initialized:
+                    log(f"[WARNING] Direct init failed for Chrome >=115: {str(e)}")
+                    log("[HINT] Trying Chrome-for-Testing fallback with an exact matching driver...")
+                finally:
+                    os.environ["PATH"] = original_path
+
+                if not driver_initialized:
+                    try:
+                        matching_driver_path = _get_or_download_matching_chromedriver(chrome_major, log)
+                        if matching_driver_path:
+                            service = Service(executable_path=matching_driver_path)
+                            driver = webdriver.Chrome(service=service, options=chrome_options)
+                            driver_initialized = True
+                            log("[SETUP] Matching Chrome-for-Testing driver initialization succeeded.")
+                        else:
+                            raise WebDriverException("Matching Chrome-for-Testing driver could not be resolved.")
+                    except Exception as e:
+                        log(f"[ERROR] Chrome-for-Testing fallback failed: {str(e)}")
+                        error_tracker["driver_setup"]["status"] = "failed"
+                        error_tracker["driver_setup"]["error"] = f"Direct and Chrome-for-Testing fallbacks failed: {str(e)}"
+                        attempt += 1
+                        continue
+
+            # Legacy fallback path for older Chrome versions only.
+            if chrome_major < 115 and not driver_initialized:
                 try:
                     log("[SETUP] Trying webdriver_manager with default settings...")
-                    from webdriver_manager.chrome import ChromeDriverManager
                     service = Service(ChromeDriverManager().install())
                     driver = webdriver.Chrome(service=service, options=chrome_options)
                     driver_initialized = True
-                    log("[SETUP] Chrome WebDriver initialized successfully with default settings.")
+                    log("[SETUP] webdriver_manager initialization succeeded.")
+                except SessionNotCreatedException as e:
+                    log(f"[WARNING] webdriver_manager session mismatch: {str(e)}")
+                    log("[HINT] Detected browser/driver mismatch. Update ChromeDriver or rely on Selenium Manager with latest Selenium.")
                 except Exception as e:
-                    log(f"[WARNING] WebDriverManager default approach failed: {str(e)}")
-            
-            # Strategy 3: Using local ChromeDriver if it exists
-            if not driver_initialized:
+                    log(f"[WARNING] webdriver_manager failed: {str(e)}")
+
+            if chrome_major < 115 and not driver_initialized:
                 for path in ["chromedriver.exe", "./chromedriver.exe", "/usr/local/bin/chromedriver"]:
                     if os.path.exists(path):
                         try:
@@ -386,18 +672,27 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                             service = Service(executable_path=path)
                             driver = webdriver.Chrome(service=service, options=chrome_options)
                             driver_initialized = True
-                            log(f"[SETUP] Chrome WebDriver initialized successfully using local driver at {path}")
+                            log(f"[SETUP] Local ChromeDriver succeeded: {path}")
                             break
+                        except SessionNotCreatedException as e:
+                            log(f"[WARNING] Local driver mismatch at {path}: {str(e)}")
+                            log("[HINT] Detected browser/driver mismatch. Update ChromeDriver or rely on Selenium Manager with latest Selenium.")
                         except Exception as e:
                             log(f"[WARNING] Local ChromeDriver at {path} failed: {str(e)}")
-            
-            # Strategy 4: Use direct initialization as last resort
-            if not driver_initialized:
+
+            if chrome_major < 115 and not driver_initialized:
                 try:
-                    log("[SETUP] Trying direct Chrome WebDriver initialization...")
+                    log("[SETUP] Final fallback: direct Chrome WebDriver initialization...")
                     driver = webdriver.Chrome(options=chrome_options)
                     driver_initialized = True
-                    log("[SETUP] Chrome WebDriver initialized successfully via direct approach.")
+                    log("[SETUP] Final direct initialization succeeded.")
+                except SessionNotCreatedException as e:
+                    log(f"[ERROR] All WebDriver initialization methods failed: {str(e)}")
+                    log("[HINT] Detected browser/driver mismatch. Update ChromeDriver or rely on Selenium Manager with latest Selenium.")
+                    error_tracker["driver_setup"]["status"] = "failed"
+                    error_tracker["driver_setup"]["error"] = f"All initialization methods failed: {str(e)}"
+                    attempt += 1
+                    continue
                 except Exception as e:
                     log(f"[ERROR] All WebDriver initialization methods failed: {str(e)}")
                     error_tracker["driver_setup"]["status"] = "failed"
@@ -414,30 +709,53 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             error_tracker["driver_setup"]["status"] = "success"
             
             # Load cookies for authentication
-            auth_token = load_cookies()
-            if auth_token:
+            cookies = load_cookies()
+            if cookies and cookies.get("auth_token"):
                 log("[AUTH] Applying authentication cookies...")
                 try:
                     driver.get("https://x.com")
                     time.sleep(random.uniform(2, 4))
                     driver.add_cookie({
                         "name": "auth_token",
-                        "value": auth_token,
+                        "value": cookies["auth_token"],
                         "domain": ".x.com",
                         "secure": True,
                         "httpOnly": True,
                         "path": "/",
                     })
+                    if cookies.get("ct0"):
+                        driver.add_cookie({
+                            "name": "ct0",
+                            "value": cookies["ct0"],
+                            "domain": ".x.com",
+                            "secure": True,
+                            "httpOnly": False,
+                            "path": "/",
+                        })
                     log("[AUTH] Cookies applied successfully.")
                     driver.refresh()
                     time.sleep(random.uniform(2, 4))
                     simulate_human_behavior(driver)
+
+                    error_tracker["auth_verification"]["status"] = "in_progress"
+                    auth_ok, auth_reason = verify_authenticated_session(driver, search_term, attempt, log)
+                    if not auth_ok:
+                        error_tracker["auth_verification"]["status"] = "failed"
+                        error_tracker["auth_verification"]["error"] = auth_reason
+                        log(f"[ERROR] {auth_reason}")
+                        attempt += 1
+                        continue
+                    error_tracker["auth_verification"]["status"] = "success"
                 except Exception as e:
                     log(f"[ERROR] Failed to set cookies: {str(e)}")
                     error_tracker["page_load"]["status"] = "failed"
                     error_tracker["page_load"]["error"] = f"Cookie application failed: {str(e)}"
                     attempt += 1
                     continue
+            else:
+                error_tracker["auth_verification"]["status"] = "skipped"
+                error_tracker["auth_verification"]["error"] = "No auth_token available"
+                log("[WARNING] No auth_token available; proceeding without authenticated session.")
 
             # Page Load with CAPTCHA Detection
             error_tracker["page_load"]["status"] = "in_progress"
@@ -471,13 +789,11 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                 page_title_lower = driver.title.lower()
                 is_on_search_or_explore = ("x.com/search" in current_url_lower or "x.com/explore" in current_url_lower or
                                          "twitter.com/search" in current_url_lower or "twitter.com/explore" in current_url_lower)
-                is_on_login_flow = ("x.com/i/flow/login" in current_url_lower or
-                                  "twitter.com/i/flow/login" in current_url_lower or
-                                  "login on x" in page_title_lower or "log in to x" in page_title_lower)
+                is_on_login_flow, login_reason = _is_login_or_challenge_page(driver)
 
                 if not is_on_search_or_explore or is_on_login_flow:
                     error_tracker["page_load"]["status"] = "failed"
-                    error_message = f"Redirected or on login page. URL: {driver.current_url}, Title: {driver.title}"
+                    error_message = f"Redirected or on login/challenge page ({login_reason}). URL: {driver.current_url}, Title: {driver.title}"
                     error_tracker["page_load"]["error"] = error_message
                     log(f"[ERROR] Page load issue: {error_message}")
                     try:
@@ -711,11 +1027,10 @@ def run_twitter_analysis_script(search_term):
         yield "[STEP 1/5] Scraping and initial deduplicating tweets..."
         raw_tweets = []
         
-        # Create a collector function to yield messages from scraper
+        # Create a collector function to capture messages from scraper
         messages = []
         def collect_message(msg):
             messages.append(msg)
-            yield msg
         
         # Run the scraper
         raw_tweets = scrape_twitter_trends(search_term, progress_callback=collect_message)
@@ -728,6 +1043,7 @@ def run_twitter_analysis_script(search_term):
         
         if not raw_tweets:
             yield "[ERROR] No tweets found or scraping failed for the given search term."
+            yield f"[DIAG] {build_failure_summary()}"
             return
 
         # Step 2: Save raw tweets
@@ -771,6 +1087,7 @@ def run_twitter_analysis_script(search_term):
     except Exception as e:
         import traceback
         yield f"[ERROR] An error occurred: {str(e)}"
+        yield f"[DIAG] {build_failure_summary()}"
         traceback.print_exc()
         yield traceback.format_exc()
 
@@ -780,7 +1097,9 @@ if __name__ == "__main__":
         print("==========================")
         print("[WARNING] This script performs web scraping on X. Use sparingly to avoid account restrictions.")
         
-        term = input("Enter a search term: ").strip()
+        term = input("Enter a search term (leave blank for random): ").strip()
+        if not term:
+            term = pick_random_search_term()
         
         start_time = time.time()
         for message in run_twitter_analysis_script(term):
