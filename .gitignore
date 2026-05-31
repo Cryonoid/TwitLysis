@@ -2,6 +2,12 @@
 twitter_cookies.json
 twt_venv/
 .vscode/
+debug_html/
+tweets/
+debug_html/
+debug_*.html
+drivers/
+.wdm/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
