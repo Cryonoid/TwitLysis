@@ -32,6 +32,7 @@ error_tracker = {
     "deduplication": {"status": "not_started", "error": None},
     "file_operations": {"status": "not_started", "error": None},
     "captcha_detection": {"status": "not_started", "error": None},
+    "auth_verification": {"status": "not_started", "error": None},
 }
 
 SEARCH_TERMS = {
