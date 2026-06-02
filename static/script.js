@@ -1,5 +1,13 @@
-document.addEventListener('DOMContentLoaded', function() {
-    // DOM elements
+/**
+ * TwitLysis v2.0 — Frontend Controller
+ * Handles sidebar navigation, SSE search streaming, tweet rendering with links,
+ * engagement display, Chart.js lifecycle management, and memory cleanup.
+ */
+document.addEventListener('DOMContentLoaded', function () {
+
+    // =========================================================================
+    // DOM References
+    // =========================================================================
     const searchQueryInput = document.getElementById('search-query');
     const searchButton = document.getElementById('search-button');
     const searchStatus = document.getElementById('search-status');
@@ -8,316 +16,423 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressBar = document.getElementById('progress-bar');
     const progressText = document.getElementById('progress-text');
     const resultsList = document.getElementById('results-list');
-    const tabButtons = document.querySelectorAll('.tab-button');
-    const tabContents = document.querySelectorAll('.tab-content');
-    
-    // Event listeners
-    searchButton.addEventListener('click', startSearch);
-    tabButtons.forEach(button => {
-        button.addEventListener('click', () => switchTab(button.dataset.tab));
+    const navItems = document.querySelectorAll('.nav-item');
+
+    // Chart instance registry (destroy before re-create to prevent memory leaks)
+    const chartInstances = {};
+
+    // Active EventSource reference (close on completion to prevent leaks)
+    let activeEventSource = null;
+
+    // =========================================================================
+    // Sidebar Panel Navigation
+    // =========================================================================
+    navItems.forEach(item => {
+        item.addEventListener('click', () => {
+            const panelId = item.dataset.panel;
+            if (panelId) switchPanel(panelId);
+        });
     });
-    
-    // Load initial data
-    loadPreviousResults();
-    loadTrends();
-    loadHashtags();
-    
-    // Functions
+
+    function switchPanel(panelId) {
+        // Update nav items
+        navItems.forEach(item => {
+            item.classList.toggle('active', item.dataset.panel === panelId);
+        });
+        // Update panels
+        document.querySelectorAll('.panel').forEach(panel => {
+            panel.classList.toggle('active', panel.id === panelId);
+        });
+    }
+
+    // =========================================================================
+    // Search — Enter Key Support
+    // =========================================================================
+    searchQueryInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !searchButton.disabled) {
+            startSearch();
+        }
+    });
+
+    searchButton.addEventListener('click', startSearch);
+
+    // =========================================================================
+    // Search — SSE Streaming
+    // =========================================================================
     function startSearch() {
         const query = searchQueryInput.value.trim();
         if (!query) {
-            searchStatus.textContent = "Please enter a search term";
-            searchStatus.classList.add('error');
+            searchStatus.textContent = 'Please enter a search term';
+            searchStatus.className = 'search-status error';
             return;
         }
-        
+
+        // Close any existing EventSource
+        if (activeEventSource) {
+            activeEventSource.close();
+            activeEventSource = null;
+        }
+
         // Reset UI
-        searchStatus.textContent = "";
-        searchStatus.classList.remove('error');
-        liveOutput.innerHTML = '<p class="info-message">Starting analysis...</p>';
+        searchStatus.textContent = '';
+        searchStatus.className = 'search-status';
+        liveOutput.innerHTML = '';
         progressContainer.style.display = 'block';
         progressBar.style.width = '0%';
         progressText.textContent = 'Starting...';
         searchButton.disabled = true;
-        
-        // Start EventSource for SSE
-        const eventSource = new EventSource(`/api/search?query=${encodeURIComponent(query)}`);
-        
-        eventSource.onmessage = function(event) {
+
+        // Ensure we're on the search panel
+        switchPanel('search-panel');
+
+        // Start SSE connection
+        activeEventSource = new EventSource(`/api/search?query=${encodeURIComponent(query)}`);
+
+        activeEventSource.onmessage = function (event) {
             try {
                 const data = JSON.parse(event.data);
-                
-                // Handle error messages
+
+                // Handle error
                 if (data.error) {
-                    liveOutput.innerHTML += `<p class="error-message">${data.message}</p>`;
-                    searchStatus.textContent = "Error occurred during analysis";
-                    searchStatus.classList.add('error');
+                    appendOutput(data.message, 'error');
+                    searchStatus.textContent = 'Error occurred during analysis';
+                    searchStatus.className = 'search-status error';
                     progressContainer.style.display = 'none';
                     searchButton.disabled = false;
-                    eventSource.close();
+                    closeEventSource();
                     return;
                 }
-                
-                // Update progress bar
+
+                // Update progress
                 if (data.progress !== undefined) {
                     progressBar.style.width = `${data.progress}%`;
                     progressText.textContent = `${data.progress}% Complete`;
                 }
-                
-                // Format and display message
+
+                // Display message
                 if (data.message) {
-                    // Format message based on content
-                    let messageClass = 'log-message';
-                    if (data.message.includes('[ERROR]')) {
-                        messageClass = 'error-message';
-                    } else if (data.message.includes('[WARNING]')) {
-                        messageClass = 'warning-message';
-                    } else if (data.message.includes('[INFO]') || data.message.includes('[COMPLETE]')) {
-                        messageClass = 'info-message';
-                    }
-                    
-                    liveOutput.innerHTML += `<p class="${messageClass}">${data.message}</p>`;
-                    liveOutput.scrollTop = liveOutput.scrollHeight; // Auto-scroll to bottom
+                    let cls = 'log';
+                    if (data.message.includes('[ERROR]') || data.message.includes('[CRITICAL]')) cls = 'error';
+                    else if (data.message.includes('[WARNING]')) cls = 'warning';
+                    else if (data.message.includes('[INFO]') || data.message.includes('[COMPLETE]') || data.message.includes('[RESULTS]')) cls = 'info';
+                    else if (data.message.includes('[STEP')) cls = 'success';
+
+                    appendOutput(data.message, cls);
                 }
-                
+
                 // Check for completion
-                if (data.progress === 100 || data.message.includes('[COMPLETE]')) {
+                if (data.progress === 100 || (data.message && data.message.includes('[COMPLETE]'))) {
                     finishSearch(query);
                 }
-                
+
             } catch (e) {
-                console.error('Error parsing SSE message:', e);
-                liveOutput.innerHTML += `<p class="error-message">[ERROR] Communication error with server</p>`;
+                console.error('SSE parse error:', e);
+                appendOutput('[ERROR] Communication error with server', 'error');
             }
         };
-        
-        eventSource.onerror = function() {
-            liveOutput.innerHTML += `<p class="error-message">[ERROR] Connection to server lost</p>`;
-            searchStatus.textContent = "Connection error";
-            searchStatus.classList.add('error');
+
+        activeEventSource.onerror = function () {
+            appendOutput('[ERROR] Connection to server lost', 'error');
+            searchStatus.textContent = 'Connection error';
+            searchStatus.className = 'search-status error';
             progressContainer.style.display = 'none';
             searchButton.disabled = false;
-            eventSource.close();
+            closeEventSource();
         };
     }
-    
+
+    function closeEventSource() {
+        if (activeEventSource) {
+            activeEventSource.close();
+            activeEventSource = null;
+        }
+    }
+
+    function appendOutput(text, cls) {
+        const line = document.createElement('p');
+        line.className = `output-line ${cls}`;
+        line.textContent = text;
+        liveOutput.appendChild(line);
+        liveOutput.scrollTop = liveOutput.scrollHeight;
+    }
+
     function finishSearch(query) {
-        // Enable search button
         searchButton.disabled = false;
-        
-        // Update status
-        searchStatus.textContent = "Analysis complete!";
-        searchStatus.classList.add('success');
-        
-        // Update progress
-        progressText.textContent = "Complete";
-        progressBar.style.width = "100%";
-        
-        // Refresh results list with a slight delay
+        searchStatus.textContent = 'Analysis complete!';
+        searchStatus.className = 'search-status success';
+        progressText.textContent = 'Complete';
+        progressBar.style.width = '100%';
+        closeEventSource();
+
+        // Refresh data and navigate to results
         setTimeout(() => {
             loadPreviousResults();
             loadTrends();
             loadHashtags();
-            
-            // Remove progress bar after a delay
+
             setTimeout(() => {
                 progressContainer.style.display = 'none';
-            }, 2000);
-        }, 1000);
+                switchPanel('results-panel');
+            }, 1500);
+        }, 800);
     }
-    
-    function switchTab(tabId) {
-        tabButtons.forEach(button => {
-            button.classList.toggle('active', button.dataset.tab === tabId);
-        });
-        
-        tabContents.forEach(content => {
-            content.classList.toggle('active', content.id === tabId);
-        });
-    }
-    
+
+    // =========================================================================
+    // Load Previous Results
+    // =========================================================================
     function loadPreviousResults() {
         fetch('/api/previous-results')
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
                 resultsList.innerHTML = '';
-                
-                if (data.length === 0) {
-                    resultsList.innerHTML = '<p class="no-results">No previous results found</p>';
+
+                if (!data.length) {
+                    resultsList.innerHTML = '<p class="no-results">No previous results found. Run a search to get started.</p>';
                     return;
                 }
-                
+
+                const frag = document.createDocumentFragment();
                 data.forEach(result => {
-                    const resultItem = document.createElement('div');
-                    resultItem.className = 'result-item';
-                    resultItem.innerHTML = `
-                        <h3>${result.term}</h3>
+                    const card = document.createElement('div');
+                    card.className = 'result-card';
+                    card.innerHTML = `
+                        <h3>${escapeHtml(result.term)}</h3>
                         <div class="result-meta">
                             <span><i class="fas fa-chart-line"></i> Score: ${result.score}</span>
-                            <span><i class="fas fa-comment"></i> Tweets: ${result.tweet_count}</span>
+                            <span><i class="fas fa-comment"></i> ${result.tweet_count} tweets</span>
                             <span><i class="fas fa-calendar"></i> ${result.date}</span>
                         </div>
-                        <button class="view-button" data-term="${result.term}">View Details</button>
+                        <button class="view-btn" data-term="${escapeHtml(result.term)}">View Details</button>
                     `;
-                    resultsList.appendChild(resultItem);
-                    
-                    // Add event listener to view button
-                    resultItem.querySelector('.view-button').addEventListener('click', () => {
+                    frag.appendChild(card);
+
+                    card.querySelector('.view-btn').addEventListener('click', () => {
                         document.getElementById('term-select').value = result.term;
                         loadTermDetails(result.term);
-                        switchTab('selected-tab');
+                        switchPanel('trends-panel');
                     });
                 });
-                
+                resultsList.appendChild(frag);
+
                 // Update term selector
                 updateTermSelector(data.map(r => r.term));
             })
-            .catch(error => {
-                console.error('Error loading previous results:', error);
-                resultsList.innerHTML = '<p class="error-message">Failed to load previous results</p>';
+            .catch(err => {
+                console.error('Error loading results:', err);
+                resultsList.innerHTML = '<p class="no-results">Failed to load previous results</p>';
             });
     }
-    
+
+    // =========================================================================
+    // Term Selector
+    // =========================================================================
     function updateTermSelector(terms) {
-        const termSelect = document.getElementById('term-select');
-        const currentSelection = termSelect.value;
-        
-        // Clear existing options except the default one
-        while (termSelect.options.length > 1) {
-            termSelect.remove(1);
-        }
-        
-        // Add new terms
+        const sel = document.getElementById('term-select');
+        const current = sel.value;
+
+        // Clear existing options except default
+        while (sel.options.length > 1) sel.remove(1);
+
         terms.forEach(term => {
-            const option = document.createElement('option');
-            option.value = term;
-            option.textContent = term;
-            termSelect.appendChild(option);
+            const opt = document.createElement('option');
+            opt.value = term;
+            opt.textContent = term;
+            sel.appendChild(opt);
         });
-        
-        // Restore selection if possible
-        if (currentSelection && terms.includes(currentSelection)) {
-            termSelect.value = currentSelection;
-        }
-        
-        // Add change event listener
-        if (!termSelect.hasEventListener) {
-            termSelect.addEventListener('change', () => {
-                const selectedTerm = termSelect.value;
-                if (selectedTerm) {
-                    loadTermDetails(selectedTerm);
+
+        if (current && terms.includes(current)) sel.value = current;
+
+        // Attach listener once
+        if (!sel._hasListener) {
+            sel.addEventListener('change', () => {
+                if (sel.value) {
+                    loadTermDetails(sel.value);
                 } else {
                     document.getElementById('selected-term-details').style.display = 'none';
                     document.getElementById('no-term-selected').style.display = 'block';
                 }
             });
-            termSelect.hasEventListener = true;
+            sel._hasListener = true;
         }
     }
-    
+
+    // =========================================================================
+    // Term Details (Sentiment + Top Tweets)
+    // =========================================================================
     function loadTermDetails(term) {
         document.getElementById('selected-term-details').style.display = 'none';
         document.getElementById('no-term-selected').style.display = 'none';
-        
+
         fetch(`/api/term-details?term=${encodeURIComponent(term)}`)
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
                 if (data.error) {
-                    console.error('Error loading term details:', data.error);
+                    console.error('Term details error:', data.error);
                     return;
                 }
-                
-                // Display term details
+
                 document.getElementById('selected-term-details').style.display = 'block';
                 document.getElementById('no-term-selected').style.display = 'none';
-                
-                // Render sentiment chart
+
+                // Sentiment chart
                 renderSentimentChart('selected-sentiment-chart', data.sentiment);
-                
-                // Render top tweets
+
+                // Signal strength badge
+                const badge = document.getElementById('signal-strength-badge');
+                if (data.sentiment && data.sentiment.signal_strength && data.sentiment.signal_strength !== 'none') {
+                    const strength = data.sentiment.signal_strength;
+                    const compound = data.sentiment.avg_compound || 0;
+                    const direction = compound >= 0 ? 'Positive' : 'Negative';
+                    badge.className = `signal-badge ${strength}`;
+                    badge.innerHTML = `<i class="fas fa-signal"></i> ${capitalize(strength)} ${direction} Signal (${compound > 0 ? '+' : ''}${compound})`;
+                } else {
+                    badge.className = 'signal-badge none';
+                    badge.innerHTML = '';
+                }
+
+                // Tweets
                 const tweetsContainer = document.getElementById('selected-tweets');
                 tweetsContainer.innerHTML = '';
-                
+
                 if (data.tweets && data.tweets.length > 0) {
+                    const frag = document.createDocumentFragment();
                     data.tweets.forEach(tweet => {
-                        const tweetElement = document.createElement('div');
-                        tweetElement.className = 'tweet';
-                        tweetElement.innerHTML = `
-                            <p class="tweet-text">${tweet.text}</p>
-                            <div class="tweet-meta">
-                                <span class="tweet-username">@${tweet.username || 'unknown'}</span>
-                                <span class="tweet-score">Relevancy: ${tweet.relevancy_score}%</span>
-                            </div>
-                        `;
-                        tweetsContainer.appendChild(tweetElement);
+                        frag.appendChild(createTweetElement(tweet));
                     });
+                    tweetsContainer.appendChild(frag);
                 } else {
                     tweetsContainer.innerHTML = '<p class="no-results">No tweets found</p>';
                 }
             })
-            .catch(error => {
-                console.error('Error loading term details:', error);
-            });
+            .catch(err => console.error('Error loading term details:', err));
     }
-    
+
+    // =========================================================================
+    // Tweet Element Builder
+    // =========================================================================
+    function createTweetElement(tweet) {
+        const el = document.createElement('div');
+        el.className = 'tweet';
+
+        const username = tweet.username || 'unknown';
+        const score = tweet.relevancy_score || 0;
+        const text = tweet.text || '';
+        const url = tweet.tweet_url || '';
+        const eng = tweet.engagement || {};
+
+        let linkHtml = '';
+        if (url) {
+            linkHtml = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="tweet-link"><i class="fas fa-external-link-alt"></i> View on X</a>`;
+        }
+
+        let engHtml = '';
+        if (eng.replies || eng.retweets || eng.likes) {
+            engHtml = `
+                <div class="tweet-engagement">
+                    <span><i class="fas fa-reply"></i> ${formatNum(eng.replies || 0)}</span>
+                    <span><i class="fas fa-retweet"></i> ${formatNum(eng.retweets || 0)}</span>
+                    <span><i class="fas fa-heart"></i> ${formatNum(eng.likes || 0)}</span>
+                </div>
+            `;
+        }
+
+        el.innerHTML = `
+            <p class="tweet-text">${escapeHtml(text)}</p>
+            <div class="tweet-meta">
+                <span class="tweet-username">${escapeHtml(username)}</span>
+                <span class="tweet-score">Relevancy: ${score}%</span>
+                ${linkHtml}
+            </div>
+            ${engHtml}
+        `;
+        return el;
+    }
+
+    // =========================================================================
+    // Trends
+    // =========================================================================
     function loadTrends() {
         fetch('/api/trends')
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
-                const topTrendsList = document.getElementById('top-trends-list');
-                topTrendsList.innerHTML = '';
-                
+                const list = document.getElementById('top-trends-list');
+                list.innerHTML = '';
+
                 if (data.top_trends && data.top_trends.length > 0) {
                     data.top_trends.forEach(trend => {
-                        const trendItem = document.createElement('li');
-                        trendItem.innerHTML = `
-                            <span class="trend-name">${trend.term}</span>
+                        const li = document.createElement('li');
+                        li.innerHTML = `
+                            <span class="trend-name">${escapeHtml(trend.term)}</span>
                             <span class="trend-count">${trend.count} tweets</span>
                         `;
-                        trendItem.addEventListener('click', () => {
+                        li.addEventListener('click', () => {
                             document.getElementById('term-select').value = trend.term;
                             loadTermDetails(trend.term);
-                            switchTab('selected-tab');
+                            switchPanel('trends-panel');
                         });
-                        topTrendsList.appendChild(trendItem);
+                        list.appendChild(li);
                     });
                 } else {
-                    topTrendsList.innerHTML = '<li class="no-trends">No trends data available</li>';
+                    list.innerHTML = '<li class="no-results">No trends data available yet</li>';
                 }
             })
-            .catch(error => {
-                console.error('Error loading trends:', error);
-            });
+            .catch(err => console.error('Error loading trends:', err));
     }
-    
+
+    // =========================================================================
+    // Hashtags
+    // =========================================================================
     function loadHashtags() {
         fetch('/api/hashtags')
-            .then(response => response.json())
+            .then(r => r.json())
             .then(data => {
                 if (data.hashtags && data.hashtags.length > 0) {
                     renderHashtagCloud(data.hashtags);
                     renderHashtagChart(data.hashtags.slice(0, 10));
                 } else {
                     document.getElementById('hashtag-cloud').innerHTML = '<p class="no-results">No hashtags data available</p>';
-                    document.getElementById('hashtag-chart').innerHTML = '<p class="no-results">No hashtags data available</p>';
                 }
             })
-            .catch(error => {
-                console.error('Error loading hashtags:', error);
-            });
+            .catch(err => console.error('Error loading hashtags:', err));
     }
-    
+
+    function renderHashtagCloud(hashtags) {
+        const container = document.getElementById('hashtag-cloud');
+        container.innerHTML = '';
+        const frag = document.createDocumentFragment();
+
+        hashtags.forEach(hashtag => {
+            const tag = document.createElement('span');
+            tag.className = 'hashtag';
+            tag.textContent = hashtag.text;
+            tag.style.fontSize = `${Math.max(0.8, Math.min(2.2, 0.9 + (hashtag.count / 8) * 0.15))}em`;
+            tag.addEventListener('click', () => {
+                searchQueryInput.value = hashtag.text;
+                switchPanel('search-panel');
+                startSearch();
+            });
+            frag.appendChild(tag);
+        });
+        container.appendChild(frag);
+    }
+
+    // =========================================================================
+    // Chart.js — Managed Lifecycle
+    // =========================================================================
+    function destroyChart(key) {
+        if (chartInstances[key]) {
+            chartInstances[key].destroy();
+            delete chartInstances[key];
+        }
+    }
+
     function renderSentimentChart(canvasId, sentimentData) {
         const canvas = document.getElementById(canvasId);
         if (!canvas) return;
-        
-        // Destroy existing chart if it exists
-        if (canvas.chart) {
-            canvas.chart.destroy();
-        }
-        
-        // Create new chart
-        canvas.chart = new Chart(canvas, {
+
+        destroyChart(canvasId);
+
+        chartInstances[canvasId] = new Chart(canvas, {
             type: 'doughnut',
             data: {
                 labels: ['Positive', 'Neutral', 'Negative'],
@@ -327,93 +442,92 @@ document.addEventListener('DOMContentLoaded', function() {
                         sentimentData.neutral || 0,
                         sentimentData.negative || 0
                     ],
-                    backgroundColor: [
-                        '#4caf50', // Green for positive
-                        '#ff9800', // Orange for neutral
-                        '#f44336'  // Red for negative
-                    ]
+                    backgroundColor: ['#00ba7c', '#ffad1f', '#f4212e'],
+                    borderWidth: 0,
+                    hoverOffset: 6
                 }]
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
+                cutout: '65%',
                 plugins: {
                     legend: {
                         position: 'bottom',
                         labels: {
-                            color: '#e0e0e0'
+                            color: '#8899a6',
+                            padding: 16,
+                            font: { family: "'Inter', sans-serif", size: 12 }
                         }
                     }
                 }
             }
         });
     }
-    
-    function renderHashtagCloud(hashtags) {
-        const container = document.getElementById('hashtag-cloud');
-        container.innerHTML = '';
-        
-        hashtags.forEach(hashtag => {
-            const tag = document.createElement('span');
-            tag.className = 'hashtag';
-            tag.textContent = hashtag.text;
-            tag.style.fontSize = `${Math.max(0.8, Math.min(2.5, 1 + (hashtag.count / 5) * 0.1))}em`;
-            tag.addEventListener('click', () => {
-                searchQueryInput.value = hashtag.text;
-                startSearch();
-            });
-            container.appendChild(tag);
-        });
-    }
-    
+
     function renderHashtagChart(hashtags) {
         const canvas = document.getElementById('hashtag-chart');
         if (!canvas) return;
-        
-        // Destroy existing chart if it exists
-        if (canvas.chart) {
-            canvas.chart.destroy();
-        }
-        
-        // Create new chart
-        canvas.chart = new Chart(canvas, {
+
+        destroyChart('hashtag-chart');
+
+        chartInstances['hashtag-chart'] = new Chart(canvas, {
             type: 'bar',
             data: {
                 labels: hashtags.map(h => h.text),
                 datasets: [{
-                    label: 'Tweet Count',
+                    label: 'Mentions',
                     data: hashtags.map(h => h.count),
-                    backgroundColor: '#1da1f2',
-                    borderColor: '#0d8ecf',
-                    borderWidth: 1
+                    backgroundColor: 'rgba(29, 161, 242, 0.6)',
+                    borderColor: '#1da1f2',
+                    borderWidth: 1,
+                    borderRadius: 4
                 }]
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: false,
                 scales: {
                     x: {
-                        ticks: {
-                            color: '#e0e0e0'
-                        },
-                        grid: {
-                            color: '#333'
-                        }
+                        ticks: { color: '#8899a6', font: { family: "'Inter', sans-serif", size: 11 } },
+                        grid: { color: 'rgba(47, 51, 54, 0.5)' }
                     },
                     y: {
                         beginAtZero: true,
-                        ticks: {
-                            color: '#e0e0e0'
-                        },
-                        grid: {
-                            color: '#333'
-                        }
+                        ticks: { color: '#8899a6', font: { family: "'Inter', sans-serif", size: 11 } },
+                        grid: { color: 'rgba(47, 51, 54, 0.5)' }
                     }
                 },
                 plugins: {
-                    legend: {
-                        display: false
-                    }
+                    legend: { display: false }
                 }
             }
         });
     }
+
+    // =========================================================================
+    // Utilities
+    // =========================================================================
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function capitalize(s) {
+        return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+    }
+
+    function formatNum(n) {
+        if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+        if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+        return String(n);
+    }
+
+    // =========================================================================
+    // Initial Load
+    // =========================================================================
+    loadPreviousResults();
+    loadTrends();
+    loadHashtags();
 });

@@ -420,19 +420,46 @@ def _get_or_download_matching_chromedriver(chrome_major: int, log_fn=None):
         _log(f"[WARNING] Failed to extract ChromeDriver zip: {str(e)}")
         return None
 
+def _parse_engagement_for_relevancy(tweet):
+    """Parse engagement_raw aria-labels into numeric values for relevancy weighting."""
+    result = {"replies": 0, "retweets": 0, "likes": 0, "views": 0}
+    for label in tweet.get("engagement_raw", []):
+        label_lower = label.lower()
+        parts = label.replace(",", "").split()
+        if len(parts) >= 2 and parts[0].isdigit():
+            num = int(parts[0])
+            if "repl" in label_lower:
+                result["replies"] = num
+            elif "repost" in label_lower or "retweet" in label_lower:
+                result["retweets"] = num
+            elif "like" in label_lower:
+                result["likes"] = num
+            elif "view" in label_lower:
+                result["views"] = num
+    return result
+
+
 def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
     """
-    Calculate relevancy scores for tweets using TF-IDF and cosine similarity.
+    Multi-signal relevancy scoring for tweets.
+    Combines four signals with weighted scoring to produce smoother,
+    more useful relevancy distributions than pure TF-IDF alone:
+      - TF-IDF cosine similarity (30%): traditional term-frequency matching
+      - Keyword presence (30%): substring/word-level matching for short queries
+      - Hashtag overlap (20%): checks if tweet hashtags relate to search term
+      - Engagement normalization (20%): high-engagement tweets are likely more relevant
     Returns (tweets with scores, overall trend score).
     """
+    import math
+
     error_tracker["nlp_processing"]["status"] = "in_progress"
-    
+
     if not tweets:
         print("[WARNING] No tweets to process for relevancy scoring.")
         error_tracker["nlp_processing"]["status"] = "skipped"
         error_tracker["nlp_processing"]["error"] = "No tweets to process"
         return [], 0
-    
+
     try:
         print("[NLP] Initializing NLTK stopwords...")
         try:
@@ -442,6 +469,8 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
             nltk.download("stopwords", quiet=True)
 
         stop_words = set(stopwords.words("english"))
+        search_lower = search_term.strip().lower()
+        search_words = set(search_lower.split()) - stop_words
 
         texts = [t.get("text", "") for t in tweets if t.get("text")]
         if not texts:
@@ -449,57 +478,122 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
             error_tracker["nlp_processing"]["status"] = "skipped"
             error_tracker["nlp_processing"]["error"] = "No valid tweet texts"
             for tweet in tweets:
-                if "relevancy_score" not in tweet: tweet["relevancy_score"] = 0
+                if "relevancy_score" not in tweet:
+                    tweet["relevancy_score"] = 0
             return tweets, 0
-            
+
+        # --- Signal 1: TF-IDF cosine similarity (30%) ---
+        print("[NLP] Signal 1/4: Calculating TF-IDF cosine similarity...")
+        tfidf_scores = [0.0] * len(texts)
         all_docs = [search_term] + texts
-        
-        if len(set(all_docs)) <= 1 and len(all_docs) > 1:
-            print("[WARNING] All documents are identical or too few unique texts for TF-IDF analysis.")
-            mean_score_val = 0
-            num_scored = 0
-            for i, tweet_text in enumerate(texts):
-                if tweet_text.strip().lower() == search_term.strip().lower():
-                    tweets[i]["relevancy_score"] = 100
-                else:
-                    tweets[i]["relevancy_score"] = 75 if search_term.strip().lower() in tweet_text.strip().lower() else 25
-                mean_score_val += tweets[i]["relevancy_score"]
-                num_scored += 1
-            
-            trend_score = int(mean_score_val / num_scored) if num_scored > 0 else 0
-            error_tracker["nlp_processing"]["status"] = "partial"
-            error_tracker["nlp_processing"]["error"] = "Not enough unique content for TF-IDF; used heuristic scoring."
-            return tweets, trend_score
-        elif len(all_docs) <= 1:
-            print("[WARNING] No tweet texts to compare with search term.")
-            error_tracker["nlp_processing"]["status"] = "skipped"
-            error_tracker["nlp_processing"]["error"] = "No tweet texts for TF-IDF."
-            return tweets, 0
+        try:
+            if len(set(all_docs)) > 1:
+                vectorizer = TfidfVectorizer(stop_words=list(stop_words))
+                tfidf_matrix = vectorizer.fit_transform(all_docs)
+                sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
+                tfidf_scores = list(sim_scores)
+            else:
+                # All docs identical — give full TF-IDF score
+                tfidf_scores = [1.0] * len(texts)
+        except Exception as e_tfidf:
+            print(f"[WARNING] TF-IDF calculation failed: {e_tfidf}. Using fallback.")
+            tfidf_scores = [0.0] * len(texts)
 
-        print("[NLP] Calculating TF-IDF vectors...")
-        vectorizer = TfidfVectorizer(stop_words=list(stop_words))
-        tfidf = vectorizer.fit_transform(all_docs)
+        # --- Signal 2: Keyword presence (30%) ---
+        print("[NLP] Signal 2/4: Keyword presence matching...")
+        keyword_scores = []
+        for text in texts:
+            text_lower = text.lower()
+            if search_lower in text_lower:
+                # Exact phrase match
+                keyword_scores.append(1.0)
+            elif search_words:
+                # Word-level overlap
+                text_words = set(text_lower.split()) - stop_words
+                overlap = len(search_words & text_words)
+                keyword_scores.append(min(overlap / len(search_words), 1.0))
+            else:
+                keyword_scores.append(0.0)
 
-        print("[NLP] Computing relevancy scores (cosine similarity)...")
-        sim_scores = cosine_similarity(tfidf[0:1], tfidf[1:]).flatten()
-        
-        for i, score in enumerate(sim_scores):
-            if i < len(tweets):
-                tweets[i]["relevancy_score"] = int(score * 100)
+        # --- Signal 3: Hashtag overlap (20%) ---
+        print("[NLP] Signal 3/4: Hashtag relevancy...")
+        hashtag_scores = []
+        for i, tweet in enumerate(tweets):
+            if i >= len(texts):
+                break
+            hashtags = tweet.get("hashtags", [])
+            if not hashtags:
+                hashtag_scores.append(0.0)
+                continue
+            hashtag_text = " ".join(h.lower().lstrip("#") for h in hashtags)
+            if search_lower.replace(" ", "") in hashtag_text.replace(" ", ""):
+                hashtag_scores.append(1.0)
+            elif search_words:
+                ht_words = set(hashtag_text.split())
+                overlap = len(search_words & ht_words)
+                hashtag_scores.append(min(overlap / len(search_words), 1.0))
+            else:
+                hashtag_scores.append(0.0)
+        # Pad if needed
+        while len(hashtag_scores) < len(texts):
+            hashtag_scores.append(0.0)
 
-        trend_score = int(sim_scores.mean() * 100) if len(sim_scores) > 0 else 0
-        
-        print(f"[NLP] Relevancy calculation complete. Overall trend score: {trend_score}")
+        # --- Signal 4: Engagement normalization (20%) ---
+        print("[NLP] Signal 4/4: Engagement-based relevancy...")
+        raw_engagements = []
+        for i, tweet in enumerate(tweets):
+            if i >= len(texts):
+                break
+            eng = _parse_engagement_for_relevancy(tweet)
+            total_eng = eng["likes"] + eng["retweets"] * 2 + eng["replies"]
+            raw_engagements.append(total_eng)
+        while len(raw_engagements) < len(texts):
+            raw_engagements.append(0)
+
+        max_eng = max(raw_engagements) if raw_engagements else 0
+        if max_eng > 0:
+            engagement_scores = [math.log1p(e) / math.log1p(max_eng) for e in raw_engagements]
+        else:
+            # No engagement data — give neutral 0.5 so it doesn't penalize
+            engagement_scores = [0.5] * len(texts)
+
+        # --- Combine signals with weights ---
+        print("[NLP] Combining multi-signal scores (TF-IDF 30%, Keyword 30%, Hashtag 20%, Engagement 20%)...")
+        W_TFIDF = 0.30
+        W_KEYWORD = 0.30
+        W_HASHTAG = 0.20
+        W_ENGAGEMENT = 0.20
+
+        for i in range(min(len(texts), len(tweets))):
+            combined = (
+                tfidf_scores[i] * W_TFIDF +
+                keyword_scores[i] * W_KEYWORD +
+                hashtag_scores[i] * W_HASHTAG +
+                engagement_scores[i] * W_ENGAGEMENT
+            )
+            tweets[i]["relevancy_score"] = int(min(combined * 100, 100))
+
+        # Any remaining tweets without scores
+        for tweet in tweets:
+            if "relevancy_score" not in tweet:
+                tweet["relevancy_score"] = 0
+
+        scores_list = [t.get("relevancy_score", 0) for t in tweets]
+        trend_score = int(sum(scores_list) / len(scores_list)) if scores_list else 0
+
+        print(f"[NLP] Multi-signal relevancy complete. Overall trend score: {trend_score}")
         error_tracker["nlp_processing"]["status"] = "success"
         return tweets, trend_score
+
     except Exception as e:
         print(f"[ERROR] Error in relevancy calculation: {str(e)}")
         traceback.print_exc()
         error_tracker["nlp_processing"]["status"] = "failed"
         error_tracker["nlp_processing"]["error"] = str(e)
-        
+
         for tweet in tweets:
-            if "relevancy_score" not in tweet: tweet["relevancy_score"] = 0
+            if "relevancy_score" not in tweet:
+                tweet["relevancy_score"] = 0
         return tweets, 0
 
 def save_to_yaml(data: dict, filename: str, is_raw: bool = False) -> bool:
@@ -861,6 +955,7 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                                     potential_id = href.split('/status/')[-1].split('?')[0]
                                     if potential_id.isdigit():
                                         tweet_id = potential_id
+                                        tweet_data["tweet_url"] = href.split('?')[0]
                                         break
                             if tweet_id and tweet_id in seen_tweet_ids:
                                 continue
@@ -892,6 +987,12 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                                 continue
                             tweet_data["id"] = tweet_id
 
+                        # Ensure tweet_url exists via fallback construction
+                        if not tweet_data.get("tweet_url") and tweet_data.get("username") and tweet_id:
+                            clean_user = tweet_data["username"].lstrip("@")
+                            if clean_user and tweet_id and not tweet_id.startswith("hash_"):
+                                tweet_data["tweet_url"] = f"https://x.com/{clean_user}/status/{tweet_id}"
+
                         if not tweet_data.get("id"):
                             continue
 
@@ -913,6 +1014,20 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                             tweet_data["hashtags"] = [link.text for link in hashtag_links if link.text.startswith('#')]
                         except Exception:
                             tweet_data["hashtags"] = []
+
+                        # Extract engagement metrics (likes, retweets, replies) — best effort
+                        try:
+                            group_els = article.find_elements(
+                                By.XPATH, ".//div[@role='group']//button"
+                            )
+                            metrics = []
+                            for btn in group_els:
+                                aria = btn.get_attribute("aria-label") or ""
+                                if aria:
+                                    metrics.append(aria)
+                            tweet_data["engagement_raw"] = metrics
+                        except Exception:
+                            tweet_data["engagement_raw"] = []
 
                         if "text" in tweet_data and tweet_data["text"].strip():
                             tweets.append(tweet_data)

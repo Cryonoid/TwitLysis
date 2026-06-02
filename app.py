@@ -3,10 +3,15 @@ import os
 import yaml
 import json
 import time
+import math
 from datetime import datetime
 import re
 from collections import Counter
 import v8 as twitter_analyzer  # Import your existing Twitter analyzer script
+
+# VADER sentiment analysis (part of NLTK, no extra dependency)
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 app = Flask(__name__)
 
@@ -17,6 +22,40 @@ RESULTS_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t
 # Ensure directories exist
 os.makedirs(RAW_TWEETS_DIR, exist_ok=True)
 os.makedirs(RESULTS_TWEETS_DIR, exist_ok=True)
+
+# Lazy-loaded VADER instance (downloads lexicon on first use)
+_vader = None
+
+def _get_vader():
+    """Lazy-load VADER sentiment analyzer. Downloads lexicon on first run (~500KB)."""
+    global _vader
+    if _vader is None:
+        try:
+            nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError:
+            print("[SETUP] Downloading VADER sentiment lexicon (one-time, ~500KB)...")
+            nltk.download('vader_lexicon', quiet=True)
+        _vader = SentimentIntensityAnalyzer()
+    return _vader
+
+def _parse_engagement(tweet):
+    """Parse engagement_raw aria-labels into numeric values."""
+    result = {"replies": 0, "retweets": 0, "likes": 0, "views": 0}
+    for label in tweet.get("engagement_raw", []):
+        label_lower = label.lower()
+        # Extract number from strings like "12 likes", "1,542 views"
+        parts = label.replace(",", "").split()
+        if len(parts) >= 2 and parts[0].isdigit():
+            num = int(parts[0])
+            if "repl" in label_lower:
+                result["replies"] = num
+            elif "repost" in label_lower or "retweet" in label_lower:
+                result["retweets"] = num
+            elif "like" in label_lower:
+                result["likes"] = num
+            elif "view" in label_lower:
+                result["views"] = num
+    return result
 
 @app.route('/')
 def index():
@@ -87,7 +126,7 @@ def get_available_terms():
 
 @app.route('/api/term-details')
 def get_term_details():
-    """Get details for a specific term"""
+    """Get details for a specific term including VADER sentiment and engagement data"""
     term = request.args.get('term', '')
     if not term:
         return jsonify({"error": "No term provided"}), 400
@@ -101,7 +140,7 @@ def get_term_details():
         with open(filename, 'r', encoding='utf-8') as file:
             data = yaml.safe_load(file)
         
-        # Calculate sentiment from tweets
+        # Calculate VADER sentiment from tweet text
         sentiment = calculate_sentiment(data.get('tweets', []))
         
         # Return the top 10 most relevant tweets
@@ -110,6 +149,15 @@ def get_term_details():
             key=lambda t: t.get('relevancy_score', 0),
             reverse=True
         )[:10]
+
+        # Ensure tweet_url is present for linking back to X
+        for tweet in top_tweets:
+            if 'tweet_url' not in tweet and tweet.get('id', '').isdigit():
+                user = tweet.get('username', '').lstrip('@')
+                if user:
+                    tweet['tweet_url'] = f"https://x.com/{user}/status/{tweet['id']}"
+            # Parse engagement for display
+            tweet['engagement'] = _parse_engagement(tweet)
         
         return jsonify({
             "term": term,
@@ -146,7 +194,7 @@ def get_trends():
         top_trends = [{"term": term, "count": count} for term, count in 
                      sorted(term_counts.items(), key=lambda x: x[1], reverse=True)[:10]]
     
-    # Calculate overall sentiment
+    # Calculate overall VADER sentiment
     sentiment_overview = calculate_sentiment(all_tweets)
     
     return jsonify({
@@ -219,34 +267,66 @@ def get_previous_results():
 
 def calculate_sentiment(tweets):
     """
-    Simple sentiment analysis based on relevancy scores
-    In a real implementation, you would use a proper sentiment analysis model
+    Two-layer sentiment analysis:
+      Layer 1: VADER NLP — actual language sentiment on each tweet's text
+      Layer 2: Engagement weighting — high-engagement tweets carry more signal weight
+    
+    Returns dict with percentage breakdown, weighted compound score, and signal strength.
     """
     if not tweets:
-        return {"positive": 33, "neutral": 34, "negative": 33}
+        return {"positive": 33, "neutral": 34, "negative": 33,
+                "avg_compound": 0, "signal_strength": "none"}
     
-    positive = 0
-    neutral = 0
-    negative = 0
+    sia = _get_vader()
+    weighted_compounds = []
+    positive = neutral = negative = 0
     
     for tweet in tweets:
-        score = tweet.get('relevancy_score', 50)
-        
-        if score >= 75:
-            positive += 1
-        elif score >= 40:
+        text = tweet.get('text', '')
+        if not text.strip():
             neutral += 1
-        else:
+            continue
+        
+        scores = sia.polarity_scores(text)
+        compound = scores['compound']
+        
+        # Engagement weight: tweets with more interaction carry more signal
+        eng = _parse_engagement(tweet)
+        impact = eng["likes"] + eng["retweets"] * 2 + eng["replies"]
+        weight = math.log1p(impact) if impact > 0 else 1.0
+        
+        weighted_compounds.append((compound, weight))
+        
+        if compound >= 0.05:
+            positive += 1
+        elif compound <= -0.05:
             negative += 1
+        else:
+            neutral += 1
     
     total = positive + neutral + negative
     if total == 0:
-        return {"positive": 33, "neutral": 34, "negative": 33}
+        return {"positive": 33, "neutral": 34, "negative": 33,
+                "avg_compound": 0, "signal_strength": "none"}
+    
+    # Weighted average compound score
+    total_weight = sum(w for _, w in weighted_compounds)
+    avg_compound = sum(c * w for c, w in weighted_compounds) / total_weight if total_weight > 0 else 0
+    
+    # Signal strength classification
+    if abs(avg_compound) > 0.5:
+        signal = "strong"
+    elif abs(avg_compound) > 0.2:
+        signal = "moderate"
+    else:
+        signal = "weak"
     
     return {
         "positive": round((positive / total) * 100),
         "neutral": round((neutral / total) * 100),
-        "negative": round((negative / total) * 100)
+        "negative": round((negative / total) * 100),
+        "avg_compound": round(avg_compound, 3),
+        "signal_strength": signal
     }
 
 if __name__ == '__main__':
