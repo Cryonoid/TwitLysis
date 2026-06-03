@@ -33,13 +33,9 @@
                 <i class="fas fa-chart-line"></i>
                 <span>Trends</span>
             </a>
-            <a class="nav-item" data-panel="hashtags-panel" id="nav-hashtags">
-                <i class="fas fa-hashtag"></i>
-                <span>Hashtags</span>
-            </a>
         </div>
         <div class="sidebar-footer">
-            <span class="version-tag">v2.0</span>
+            <span class="sidebar-footer-text">Internal Tool</span>
         </div>
     </nav>
 
@@ -63,17 +59,36 @@
                     <button id="search-button"><i class="fas fa-bolt"></i> Analyze</button>
                 </div>
                 <div id="search-status" class="search-status"></div>
-                <div id="progress-container" class="progress-container" style="display: none;">
-                    <div class="progress-track">
-                        <div id="progress-bar" class="progress-bar"></div>
-                    </div>
-                    <div id="progress-text" class="progress-text">Processing...</div>
+            </div>
+
+            <!-- Segmented Step Progress -->
+            <div id="step-progress" class="step-progress" style="display: none;">
+                <div class="step-segments">
+                    <div class="step-segment" data-step="1"><span>1</span></div>
+                    <div class="step-segment" data-step="2"><span>2</span></div>
+                    <div class="step-segment" data-step="3"><span>3</span></div>
+                    <div class="step-segment" data-step="4"><span>4</span></div>
+                    <div class="step-segment" data-step="5"><span>5</span></div>
                 </div>
             </div>
-            <div class="output-area">
-                <h3><i class="fas fa-terminal"></i> Live Output</h3>
-                <div id="live-output" class="output-box">
-                    <p class="output-placeholder">Search output will appear here in real-time...</p>
+
+            <!-- Step Timeline -->
+            <div id="step-timeline" class="step-timeline">
+                <div class="step-placeholder">
+                    <i class="fas fa-layer-group"></i>
+                    <p>Analysis steps will appear here when you start a search</p>
+                </div>
+            </div>
+
+            <!-- Collapsible Raw Log -->
+            <div class="raw-log-section">
+                <button id="raw-log-toggle" class="raw-log-toggle" style="display: none;">
+                    <i class="fas fa-terminal"></i>
+                    <span>Show raw log</span>
+                    <i class="fas fa-chevron-down toggle-chevron"></i>
+                </button>
+                <div id="raw-log-container" class="raw-log-container collapsed">
+                    <div id="live-output" class="output-box"></div>
                 </div>
             </div>
         </section>
@@ -126,32 +141,21 @@
                 </div>
             </div>
 
-            <!-- Overall trends -->
+            <!-- Overall trends — enriched cards -->
             <div class="card">
                 <h3>Top Trends (by tweet volume)</h3>
-                <ul id="top-trends-list" class="trend-list"></ul>
+                <div id="top-trends-list" class="trends-card-grid"></div>
             </div>
-        </section>
 
-        <!-- Hashtags Panel -->
-        <section id="hashtags-panel" class="panel">
-            <div class="panel-header">
-                <h2><i class="fas fa-hashtag"></i> Hashtag Intelligence</h2>
-            </div>
-            <div class="card">
-                <h3>Hashtag Cloud</h3>
+            <!-- Hashtag Cloud (merged from former Hashtags panel) -->
+            <div class="card" id="hashtag-cloud-card">
+                <h3><i class="fas fa-hashtag"></i> Related Hashtags</h3>
                 <div class="hashtag-cloud" id="hashtag-cloud"></div>
-            </div>
-            <div class="card">
-                <h3>Trending Hashtags</h3>
-                <div class="chart-container">
-                    <canvas id="hashtag-chart"></canvas>
-                </div>
             </div>
         </section>
 
         <footer>
-            <p>TwitLysis &copy; 2024 &mdash; Twitter Trend Analysis Tool</p>
+            <p>TwitLysis &copy; 2026 &mdash; Twitter Trend Analysis Tool</p>
         </footer>
     </main>
 

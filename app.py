@@ -172,27 +172,46 @@ def get_term_details():
 
 @app.route('/api/trends')
 def get_trends():
-    """Get overall trend analysis"""
+    """Get overall trend analysis with per-term sentiment and top hashtags."""
     top_trends = []
     all_tweets = []
+    term_data = {}  # term -> {tweets, hashtags_counter}
     
     if os.path.exists(RESULTS_TWEETS_DIR):
-        term_counts = {}
-        
         for filename in os.listdir(RESULTS_TWEETS_DIR):
             if filename.endswith('_results.yaml'):
                 try:
                     with open(os.path.join(RESULTS_TWEETS_DIR, filename), 'r', encoding='utf-8') as file:
                         data = yaml.safe_load(file)
                         term = data.get('search_term', filename.replace('_results.yaml', '').replace('_', ' '))
-                        term_counts[term] = len(data.get('tweets', []))
-                        all_tweets.extend(data.get('tweets', []))
+                        tweets = data.get('tweets', [])
+                        
+                        # Collect hashtags for this term
+                        ht_counter = Counter()
+                        for tweet in tweets:
+                            for h in tweet.get('hashtags', []):
+                                ht_counter[h] += 1
+                            if 'text' in tweet:
+                                for h in re.findall(r'#\w+', tweet['text']):
+                                    ht_counter[h] += 1
+                        
+                        term_data[term] = {"tweets": tweets, "hashtags": ht_counter}
+                        all_tweets.extend(tweets)
                 except:
                     continue
-                    
-        # Get top trends by tweet count
-        top_trends = [{"term": term, "count": count} for term, count in 
-                     sorted(term_counts.items(), key=lambda x: x[1], reverse=True)[:10]]
+        
+        # Build enriched trend objects sorted by tweet count
+        sorted_terms = sorted(term_data.items(), key=lambda x: len(x[1]["tweets"]), reverse=True)[:10]
+        for term, info in sorted_terms:
+            sentiment = calculate_sentiment(info["tweets"])
+            top_ht = [tag for tag, _ in info["hashtags"].most_common(3)]
+            top_trends.append({
+                "term": term,
+                "count": len(info["tweets"]),
+                "sentiment_signal": sentiment.get("signal_strength", "none"),
+                "avg_compound": sentiment.get("avg_compound", 0),
+                "top_hashtags": top_ht
+            })
     
     # Calculate overall VADER sentiment
     sentiment_overview = calculate_sentiment(all_tweets)
@@ -237,7 +256,7 @@ def get_hashtags():
 
 @app.route('/api/previous-results')
 def get_previous_results():
-    """Get list of previous analysis results"""
+    """Get list of previous analysis results with sentiment preview and top tweet snippet."""
     results = []
     
     if os.path.exists(RESULTS_TWEETS_DIR):
@@ -246,17 +265,31 @@ def get_previous_results():
                 try:
                     file_path = os.path.join(RESULTS_TWEETS_DIR, filename)
                     file_stat = os.stat(file_path)
-                    file_date = datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    # Send ISO timestamp so frontend can compute relative time
+                    file_date_iso = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
                     
                     with open(file_path, 'r', encoding='utf-8') as file:
                         data = yaml.safe_load(file)
-                        
-                        results.append({
-                            "term": data.get('search_term', filename.replace('_results.yaml', '').replace('_', ' ')),
-                            "score": data.get('trend_relevancy', 0),
-                            "tweet_count": len(data.get('tweets', [])),
-                            "date": file_date
-                        })
+                    
+                    tweets = data.get('tweets', [])
+                    sentiment = calculate_sentiment(tweets)
+                    
+                    # Get preview from highest-relevancy tweet
+                    top_tweet_preview = ""
+                    if tweets:
+                        best = max(tweets, key=lambda t: t.get('relevancy_score', 0))
+                        text = best.get('text', '')
+                        top_tweet_preview = text[:100] + ('…' if len(text) > 100 else '')
+                    
+                    results.append({
+                        "term": data.get('search_term', filename.replace('_results.yaml', '').replace('_', ' ')),
+                        "score": data.get('trend_relevancy', 0),
+                        "tweet_count": len(tweets),
+                        "date": file_date_iso,
+                        "sentiment_signal": sentiment.get("signal_strength", "none"),
+                        "avg_compound": sentiment.get("avg_compound", 0),
+                        "top_tweet_preview": top_tweet_preview
+                    })
                 except:
                     continue
     

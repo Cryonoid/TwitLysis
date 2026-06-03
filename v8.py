@@ -6,6 +6,7 @@ import os
 import shutil
 import zipfile
 import urllib.request
+import urllib.parse
 from datetime import datetime
 from bs4 import BeautifulSoup
 import yaml
@@ -853,7 +854,7 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
 
             # Page Load with CAPTCHA Detection
             error_tracker["page_load"]["status"] = "in_progress"
-            url = f"https://x.com/search?q={search_term}&src=typed_query&f=live"
+            url = f"https://x.com/search?q={urllib.parse.quote(search_term)}&src=typed_query&f=live"
             log(f"[NETWORK] Accessing URL: {url}")
 
             try:
@@ -881,11 +882,22 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
 
                 current_url_lower = driver.current_url.lower()
                 page_title_lower = driver.title.lower()
-                is_on_search_or_explore = ("x.com/search" in current_url_lower or "x.com/explore" in current_url_lower or
-                                         "twitter.com/search" in current_url_lower or "twitter.com/explore" in current_url_lower)
+                is_on_search = ("x.com/search" in current_url_lower or
+                                "twitter.com/search" in current_url_lower)
+                is_on_explore = ("x.com/explore" in current_url_lower or
+                                 "twitter.com/explore" in current_url_lower)
                 is_on_login_flow, login_reason = _is_login_or_challenge_page(driver)
 
-                if not is_on_search_or_explore or is_on_login_flow:
+                if is_on_explore:
+                    error_tracker["page_load"]["status"] = "failed"
+                    error_message = f"Redirected to Explore page (search query may be malformed or empty). URL: {driver.current_url}"
+                    error_tracker["page_load"]["error"] = error_message
+                    log(f"[ERROR] {error_message}")
+                    save_debug_html(driver.page_source, search_term, attempt, "explore_redirect")
+                    attempt += 1
+                    continue
+
+                if not is_on_search or is_on_login_flow:
                     error_tracker["page_load"]["status"] = "failed"
                     error_message = f"Redirected or on login/challenge page ({login_reason}). URL: {driver.current_url}, Title: {driver.title}"
                     error_tracker["page_load"]["error"] = error_message
