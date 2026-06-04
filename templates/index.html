@@ -55,9 +55,17 @@
             </div>
             <div class="search-area">
                 <div class="input-group" id="search-input-group">
-                    <input type="text" id="search-query" placeholder="Enter search term (e.g. AI, Bitcoin, Climate Change)" autocomplete="off">
+                    <div class="search-input-wrapper">
+                        <input type="text" id="search-query" placeholder="Enter search term (e.g. AI, Bitcoin, Climate Change)" autocomplete="off">
+                        <div id="search-suggestions" class="search-suggestions" style="display:none;"></div>
+                    </div>
+                    <label class="alias-toggle" id="alias-toggle-label" title="Expand search with brand/product aliases">
+                        <input type="checkbox" id="alias-checkbox">
+                        <span>Alias Search</span>
+                    </label>
                     <button id="search-button"><i class="fas fa-bolt"></i> Analyze</button>
                 </div>
+                <div id="category-chips" class="category-chips"></div>
                 <div id="search-status" class="search-status"></div>
             </div>
 
@@ -93,7 +101,6 @@
             </div>
         </section>
 
-        <!-- Results Panel -->
         <section id="results-panel" class="panel">
             <div class="panel-header">
                 <h2><i class="fas fa-history"></i> Recent Results</h2>
@@ -103,6 +110,19 @@
                     <i class="fas fa-spinner fa-spin"></i> Loading previous results...
                 </div>
             </div>
+            <!-- Floating compare button -->
+            <div id="compare-fab" class="compare-fab" style="display:none;">
+                <i class="fas fa-columns"></i> Compare Selected (<span id="compare-count">0</span>)
+            </div>
+        </section>
+
+        <!-- Comparison Overlay -->
+        <section id="compare-overlay" class="compare-overlay" style="display:none;">
+            <div class="compare-overlay-header">
+                <h2><i class="fas fa-columns"></i> Term Comparison</h2>
+                <button id="close-compare" class="close-compare"><i class="fas fa-times"></i> Close</button>
+            </div>
+            <div id="compare-content" class="compare-content"></div>
         </section>
 
         <!-- Trends Panel -->
@@ -122,6 +142,10 @@
                     </div>
                 </div>
                 <div id="selected-term-details" class="term-details" style="display: none;">
+                    <!-- Velocity badge -->
+                    <div id="velocity-badge" class="velocity-badge-area"></div>
+                    <!-- Conversation map summary -->
+                    <div id="cluster-summary" class="cluster-summary"></div>
                     <div class="details-grid">
                         <div class="detail-col">
                             <h4>Sentiment Analysis</h4>
@@ -129,11 +153,38 @@
                                 <canvas id="selected-sentiment-chart"></canvas>
                             </div>
                             <div id="signal-strength-badge" class="signal-badge"></div>
+                            <!-- Sparkline velocity chart -->
+                            <h4 style="margin-top:1rem;">Tweet Velocity</h4>
+                            <div class="chart-container-sm" id="velocity-chart-container" style="display:none;">
+                                <canvas id="velocity-sparkline-chart"></canvas>
+                            </div>
+                            <!-- Export dropdown -->
+                            <div class="export-section">
+                                <div class="export-dropdown" id="export-dropdown">
+                                    <button class="export-btn" id="export-btn"><i class="fas fa-share-alt"></i> Export <i class="fas fa-caret-down"></i></button>
+                                    <div class="export-menu" id="export-menu" style="display:none;">
+                                        <button data-format="md"><i class="fas fa-clipboard"></i> Copy as Markdown</button>
+                                        <button data-format="html"><i class="fas fa-file-code"></i> Download HTML Report</button>
+                                        <button data-format="csv"><i class="fas fa-file-csv"></i> Download CSV</button>
+                                        <button data-format="json"><i class="fas fa-file-code"></i> Download JSON</button>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         <div class="detail-col">
-                            <h4>Top Tweets</h4>
+                            <div class="tweets-header">
+                                <h4>Top Tweets</h4>
+                                <select id="language-filter" class="language-filter" title="Filter by language">
+                                    <option value="all">🌐 All Languages</option>
+                                </select>
+                            </div>
                             <div id="selected-tweets" class="tweet-list"></div>
                         </div>
+                    </div>
+                    <!-- Topic clusters accordion -->
+                    <div id="clusters-section" class="clusters-section" style="display:none;">
+                        <h4><i class="fas fa-project-diagram"></i> Topic Clusters</h4>
+                        <div id="clusters-accordion" class="clusters-accordion"></div>
                     </div>
                 </div>
                 <div id="no-term-selected" class="no-selection">

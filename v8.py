@@ -3,17 +3,22 @@ import random
 import traceback
 import json
 import os
+import re
+import math
 import shutil
 import zipfile
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import yaml
 import nltk
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from langdetect import detect, LangDetectException
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -58,6 +63,52 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
 ]
+
+# Brand-to-product alias mapping for enhanced keyword matching (opt-in via Alias Search toggle)
+BRAND_ALIASES = {
+    "anthropic": ["claude", "claude code", "claude opus", "claude sonnet", "claude haiku"],
+    "openai": ["chatgpt", "gpt", "gpt-4", "gpt-5", "codex", "dall-e", "sora"],
+    "google": ["gemini", "bard", "deepmind", "google ai"],
+    "meta": ["llama", "meta ai", "facebook ai"],
+    "tesla": ["elon musk", "cybertruck", "model 3", "model y"],
+    "solana": ["sol", "$sol"],
+    "bitcoin": ["btc", "$btc", "satoshi"],
+    "ethereum": ["eth", "$eth", "vitalik"],
+    "microsoft": ["copilot", "azure ai", "bing ai"],
+    "apple": ["apple intelligence", "siri ai"],
+    "nvidia": ["nvda", "cuda", "tensorrt"],
+}
+
+# Pump-and-dump signal phrases for context-aware spam detection
+PUMP_DUMP_SIGNALS = {
+    "high": [
+        "100x", "1000x", "10000x",
+        "buy now before", "last chance to buy",
+        "don't miss out", "dont miss out", "next moonshot",
+        "guaranteed profit", "easy money", "free money",
+        "send .* sol to", "send .* eth to",
+        "airdrop live", "free airdrop",
+        "stealth launch", "just launched",
+        "guaranteed returns", "passive income guaranteed",
+    ],
+    "medium": [
+        "lfg", "to the moon",
+        "gem alert", "hidden gem",
+        "presale", "whitelist",
+        "join telegram", "join discord",
+        "not financial advice",
+        "dyor",
+    ],
+}
+
+# Category display icons for search suggestion chips
+CATEGORY_ICONS = {
+    "technology": "\U0001f4bb",
+    "entertainment": "\U0001f3ac",
+    "news": "\U0001f4f0",
+    "sports": "\u26bd",
+    "business": "\U0001f4bc",
+}
 
 def pick_random_search_term() -> str:
     """Pick a random term from SEARCH_TERMS categories."""
@@ -217,16 +268,25 @@ def detect_captcha(driver):
 def simulate_human_behavior(driver):
     """
     Simulate human-like mouse movements and pauses.
+    Uses viewport-safe absolute coordinates instead of relative offsets
+    to avoid 'move target out of bounds' errors when near viewport edges.
     """
     try:
+        # Get viewport dimensions for safe coordinate generation
+        vp_width = driver.execute_script("return window.innerWidth") or 800
+        vp_height = driver.execute_script("return window.innerHeight") or 600
+        # Move to a random safe point within 80% of viewport center
+        safe_x = random.randint(int(vp_width * 0.1), int(vp_width * 0.9))
+        safe_y = random.randint(int(vp_height * 0.2), int(vp_height * 0.8))
+        body = driver.find_element(By.TAG_NAME, "body")
         actions = ActionChains(driver)
-        # Random mouse movement
-        actions.move_by_offset(random.randint(-100, 100), random.randint(-100, 100)).perform()
+        actions.move_to_element_with_offset(body, safe_x, safe_y).perform()
         time.sleep(random.uniform(0.5, 1.5))
         # Random pause
         time.sleep(random.uniform(1.0, 3.0))
-    except Exception as e:
-        print(f"[WARNING] Failed to simulate human behavior: {str(e)}")
+    except Exception:
+        # Silently pass — human simulation failure is harmless and non-blocking
+        pass
 
 def get_chrome_version():
     """
@@ -440,19 +500,394 @@ def _parse_engagement_for_relevancy(tweet):
     return result
 
 
-def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
+def load_aliases(config_file="aliases.yaml"):
+    """Load brand->product alias mappings. Merges aliases.yaml (if exists) with built-in BRAND_ALIASES."""
+    aliases = {k: list(v) for k, v in BRAND_ALIASES.items()}
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config_file)
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                user_aliases = yaml.safe_load(f) or {}
+            for key, vals in user_aliases.items():
+                key_lower = key.strip().lower()
+                if key_lower in aliases:
+                    aliases[key_lower] = list(set(aliases[key_lower] + [v.lower() for v in vals]))
+                else:
+                    aliases[key_lower] = [v.lower() for v in vals]
+            print(f"[ALIAS] Loaded {len(user_aliases)} custom alias entries from {config_file}")
+    except Exception as e:
+        print(f"[WARNING] Could not load aliases from {config_file}: {e}")
+    return aliases
+
+
+def detect_tweet_language(text):
+    """Detect language of tweet text. Returns ISO 639-1 code (e.g., 'en', 'ja', 'zh-cn')."""
+    if not text or not text.strip():
+        return "en"
+    try:
+        return detect(text)
+    except LangDetectException:
+        # Fallback: detect CJK via Unicode ranges
+        if re.search(r'[\u3040-\u309f\u30a0-\u30ff]', text):  # Hiragana/Katakana → Japanese
+            return 'ja'
+        if re.search(r'[\uac00-\ud7af]', text):  # Hangul → Korean
+            return 'ko'
+        if re.search(r'[\u4e00-\u9fff]', text):  # CJK Unified → Chinese
+            return 'zh'
+        return 'en'
+
+
+def classify_search_context(query):
+    """Classify whether a search query is crypto-related or general."""
+    query_lower = query.strip().lower()
+    crypto_patterns = [
+        r'^\$[A-Za-z]{2,10}$',
+        r'^0x[a-fA-F0-9]{40}$',
+        r'^[A-Za-z0-9]{32,44}$',
+        r'\b(token|coin|dex|swap|pump|memecoin|nft|defi|airdrop|staking)\b',
+    ]
+    known_crypto = {
+        'bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol', 'cardano', 'ada',
+        'dogecoin', 'doge', 'xrp', 'ripple', 'polkadot', 'avalanche', 'matic',
+        'polygon', 'chainlink', 'uniswap', 'aave', 'litecoin', 'cosmos',
+        'near', 'arbitrum', 'optimism', 'sui', 'aptos', 'sei', 'jupiter',
+        'bonk', 'pepe', 'shiba', 'floki', 'kaspa', 'render', 'injective',
+        'crypto', 'blockchain', 'web3', 'bullrun', 'bull run',
+    }
+    if any(re.search(p, query_lower) for p in crypto_patterns):
+        return 'crypto'
+    if query_lower in known_crypto:
+        return 'crypto'
+    return 'general'
+
+
+def calculate_spam_score(tweet, search_context, search_term):
     """
-    Multi-signal relevancy scoring for tweets.
-    Combines four signals with weighted scoring to produce smoother,
-    more useful relevancy distributions than pure TF-IDF alone:
-      - TF-IDF cosine similarity (30%): traditional term-frequency matching
-      - Keyword presence (30%): substring/word-level matching for short queries
-      - Hashtag overlap (20%): checks if tweet hashtags relate to search term
-      - Engagement normalization (20%): high-engagement tweets are likely more relevant
+    Calculate spam penalty (0.0 = clean, up to 1.0 = definitely spam).
+    Context-aware: crypto searches treat wallet addresses differently.
+    Returns (penalty_float, list_of_reason_strings).
+    """
+    penalty = 0.0
+    text = tweet.get("text", "")
+    text_lower = text.lower()
+    username = tweet.get("username", "")
+    search_lower = search_term.strip().lower()
+    reasons = []
+
+    # Signal 1: Wallet/contract address (context-dependent)
+    wallet_matches = re.findall(r'[A-Za-z0-9]{32,44}', text)
+    if wallet_matches:
+        if search_context == 'general':
+            penalty += 0.40
+            reasons.append("wallet_address_in_general_search")
+        elif search_context == 'crypto':
+            search_clean = re.sub(r'[^A-Za-z0-9]', '', search_lower)
+            for wallet in wallet_matches:
+                if search_clean not in wallet.lower():
+                    penalty += 0.40
+                    reasons.append("unrelated_wallet_in_crypto_search")
+                    break
+
+    # Signal 2: Very short tweet + URL only
+    text_without_urls = re.sub(r'https?://\S+', '', text).strip()
+    urls_in_text = re.findall(r'https?://\S+', text)
+    if len(text_without_urls) < 20 and urls_in_text:
+        penalty += 0.30
+        reasons.append("short_text_with_url")
+
+    # Signal 3: Bot-like username pattern
+    username_clean = username.lstrip("@")
+    if re.match(r'^[a-z]+\d{5,}$', username_clean, re.IGNORECASE):
+        penalty += 0.15
+        reasons.append("bot_username_pattern")
+
+    # Signal 4: Pump-and-dump language (curated dictionary)
+    found_high = False
+    for phrase in PUMP_DUMP_SIGNALS.get("high", []):
+        pattern = re.escape(phrase) if '.*' not in phrase else phrase
+        if re.search(pattern, text_lower):
+            if search_context == 'crypto' and search_lower in text_lower:
+                penalty += 0.10  # Reduced penalty if about the searched coin
+            else:
+                penalty += 0.25
+            reasons.append(f"pump_dump_high:{phrase}")
+            found_high = True
+            break
+
+    if not found_high:
+        for phrase in PUMP_DUMP_SIGNALS.get("medium", []):
+            if phrase.lower() in text_lower:
+                penalty += 0.10
+                reasons.append(f"pump_dump_medium:{phrase}")
+                break
+
+    return min(penalty, 1.0), reasons
+
+
+def calculate_influence(tweet):
+    """
+    Calculate influence score based on engagement rate and absolute reach.
+    Returns 0.0 - 1.0 score. Used as tweet-level metadata/badge, NOT as a
+    relevancy weight (it doesn't measure topical relevance).
+    
+    CRITICAL: When views=0 (X often hides view counts), we CANNOT compute
+    an engagement rate. Dividing by 1 makes any interaction look like 100%
+    engagement. Instead, fall back to absolute interactions only.
+    """
+    eng = _parse_engagement_for_relevancy(tweet)
+    raw_views = eng["views"]  # 0 means "not available", not "zero views"
+    interactions = eng["likes"] + eng["retweets"] * 2 + eng["replies"]
+
+    if interactions == 0:
+        return 0.0
+
+    if raw_views > 0:
+        # Views available: use engagement rate + reach
+        engagement_rate = interactions / raw_views
+        resonance = min(math.sqrt(engagement_rate), 1.0)
+        reach = math.log1p(raw_views) / math.log1p(100_000)
+        reach = min(reach, 1.0)
+        return round(min(resonance * 0.50 + reach * 0.50, 1.0), 3)
+    else:
+        # Views NOT available: use absolute interactions only (log-scaled)
+        # 5 interactions → ~0.14, 20 → ~0.25, 100 → ~0.40, 1000 → ~0.60
+        abs_score = math.log1p(interactions) / math.log1p(1_000)
+        return round(min(abs_score, 1.0), 3)
+
+
+def calculate_velocity(tweets):
+    """
+    Calculate temporal velocity of the tweet stream.
+    Returns velocity data including tweets-per-minute, acceleration,
+    trend direction classification, and timeline buckets for sparkline charts.
+    """
+    timestamps = []
+    for tweet in tweets:
+        ts = tweet.get("timestamp")
+        if ts:
+            try:
+                clean_ts = ts.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(clean_ts)
+                timestamps.append(dt)
+            except (ValueError, TypeError):
+                continue
+
+    if len(timestamps) < 2:
+        return {
+            "velocity_tpm": 0, "acceleration": 0,
+            "trend_direction": "insufficient_data",
+            "timeline_buckets": [], "tweet_count_with_time": len(timestamps)
+        }
+
+    timestamps.sort()
+    start_time = timestamps[0]
+    end_time = timestamps[-1]
+    total_span_minutes = max((end_time - start_time).total_seconds() / 60, 1)
+
+    # Adaptive bucket size: 1-min if span < 10min, else 5-min
+    # Fixes chart not showing when all tweets arrive within ~5 minutes
+    # (5-min buckets → only 1 bucket → chart hidden at < 2 buckets)
+    bucket_minutes = 1 if total_span_minutes < 10 else 5
+    buckets = {}
+    for ts in timestamps:
+        bucket_key = int((ts - start_time).total_seconds() / (bucket_minutes * 60))
+        bucket_label = (start_time + timedelta(minutes=bucket_key * bucket_minutes)).strftime("%H:%M")
+        buckets[bucket_label] = buckets.get(bucket_label, 0) + 1
+
+    timeline_buckets = [{"time": k, "count": v} for k, v in buckets.items()]
+    velocity_tpm = round(len(timestamps) / total_span_minutes, 2)
+
+    # Acceleration: compare first half vs second half rate
+    midpoint = timestamps[len(timestamps) // 2]
+    first_half = [t for t in timestamps if t <= midpoint]
+    second_half = [t for t in timestamps if t > midpoint]
+    first_span = max((midpoint - start_time).total_seconds() / 60, 1)
+    second_span = max((end_time - midpoint).total_seconds() / 60, 1)
+    first_rate = len(first_half) / first_span
+    second_rate = len(second_half) / second_span
+
+    acceleration = round((second_rate - first_rate) / first_rate, 2) if first_rate > 0 else (1.0 if second_rate > 0 else 0.0)
+
+    # Classify trend direction
+    if acceleration > 0.3 and velocity_tpm > 2:
+        trend_direction = "surging"
+    elif acceleration > 0.1:
+        trend_direction = "growing"
+    elif acceleration > -0.1:
+        trend_direction = "steady"
+    else:
+        trend_direction = "fading"
+
+    return {
+        "velocity_tpm": velocity_tpm, "acceleration": acceleration,
+        "trend_direction": trend_direction,
+        "timeline_buckets": timeline_buckets,
+        "tweet_count_with_time": len(timestamps)
+    }
+
+
+def _compute_conversation_heat(tweets):
+    """
+    Compute per-tweet 'conversation heat' score based on temporal clustering.
+    Tweets in dense time bursts get higher scores (earned relevancy).
+    Returns list of scores (0.0 - 1.0) aligned with tweets list.
+    """
+    timestamps = []
+    for tweet in tweets:
+        ts = tweet.get("timestamp")
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                timestamps.append(dt)
+            except (ValueError, TypeError):
+                timestamps.append(None)
+        else:
+            timestamps.append(None)
+
+    valid_timestamps = [t for t in timestamps if t is not None]
+    if len(valid_timestamps) < 3:
+        return [0.5] * len(tweets)  # Neutral score when insufficient temporal data
+
+    heat_scores = []
+    window_seconds = 5 * 60  # 5-minute window
+    for ts in timestamps:
+        if ts is None:
+            heat_scores.append(0.5)
+            continue
+        neighbors = sum(1 for other in valid_timestamps if abs((ts - other).total_seconds()) <= window_seconds)
+        density = neighbors / len(valid_timestamps)
+        heat_scores.append(round(min(density * 3, 1.0), 3))  # Scale up, cap at 1.0
+
+    return heat_scores
+
+
+def cluster_tweets(tweets, search_term, n_clusters=None):
+    """
+    Group tweets into sub-theme clusters using TF-IDF + KMeans.
+    Auto-detects optimal k (2-5) using silhouette score if n_clusters is None.
+    Returns dict with clusters list and summary text.
+    """
+    texts = [t.get("text", "") for t in tweets if t.get("text", "").strip()]
+
+    if len(texts) < 6:
+        return {
+            "clusters": [{"label": search_term, "keywords": [search_term],
+                          "tweet_indices": list(range(len(tweets))),
+                          "percentage": 100, "count": len(tweets)}],
+            "summary": f"{len(tweets)} tweets (too few to cluster)"
+        }
+
+    try:
+        try:
+            nltk.data.find('corpora/stopwords')
+        except LookupError:
+            nltk.download("stopwords", quiet=True)
+
+        # Multilingual stopwords — English-only filtering causes garbage cluster
+        # labels like "Que & El & La" when tweets contain Spanish/Portuguese.
+        combined_stop_words = set(stopwords.words("english"))
+        for lang in ["spanish", "portuguese", "french", "german", "italian"]:
+            try:
+                combined_stop_words.update(stopwords.words(lang))
+            except OSError:
+                pass
+        # Social media noise words that TF-IDF often picks up
+        combined_stop_words.update([
+            "rt", "amp", "via", "lol", "omg", "smh", "tbh", "ngl", "lmao",
+            "http", "https", "www", "com", "co", "pic", "twitter",
+            "like", "just", "got", "get", "one", "new", "every", "make",
+        ])
+        stop_words_list = list(combined_stop_words)
+
+        vectorizer = TfidfVectorizer(stop_words=stop_words_list, max_features=500, min_df=2, max_df=0.9)
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        feature_names = vectorizer.get_feature_names_out()
+
+        if tfidf_matrix.shape[1] < 2:
+            return {
+                "clusters": [{"label": search_term, "keywords": [search_term],
+                              "tweet_indices": list(range(len(tweets))),
+                              "percentage": 100, "count": len(tweets)}],
+                "summary": f"{len(tweets)} tweets (insufficient vocabulary diversity)"
+            }
+
+        # Auto-detect optimal k via silhouette score
+        if n_clusters is None:
+            best_k, best_score = 2, -1
+            for k in range(2, min(6, len(texts))):
+                try:
+                    km = KMeans(n_clusters=k, random_state=42, n_init=10, max_iter=100)
+                    labels = km.fit_predict(tfidf_matrix)
+                    if len(set(labels)) < 2:
+                        continue
+                    score = silhouette_score(tfidf_matrix, labels)
+                    if score > best_score:
+                        best_score, best_k = score, k
+                except Exception:
+                    continue
+            n_clusters = best_k
+
+        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=200)
+        labels = km.fit_predict(tfidf_matrix)
+
+        # Map text indices back to tweet indices
+        text_to_tweet_idx = [idx for idx, t in enumerate(tweets) if t.get("text", "").strip()]
+
+        clusters = []
+        for cid in range(n_clusters):
+            member_text_indices = [i for i, l in enumerate(labels) if l == cid]
+            member_tweet_indices = [text_to_tweet_idx[i] for i in member_text_indices if i < len(text_to_tweet_idx)]
+            if not member_text_indices:
+                continue
+
+            centroid = km.cluster_centers_[cid]
+            top_indices = centroid.argsort()[-3:][::-1]
+            keywords = [feature_names[i] for i in top_indices if centroid[i] > 0] or [search_term]
+            label = " & ".join(kw.title() for kw in keywords[:3])
+            percentage = round(len(member_text_indices) / len(texts) * 100)
+
+            clusters.append({"label": label, "keywords": keywords,
+                             "tweet_indices": member_tweet_indices,
+                             "percentage": percentage, "count": len(member_text_indices)})
+
+        clusters.sort(key=lambda c: c["count"], reverse=True)
+        theme_parts = [f"{c['label']} ({c['percentage']}%)" for c in clusters[:4]]
+        summary = f"{len(tweets)} tweets across {len(clusters)} themes: {', '.join(theme_parts)}"
+        return {"clusters": clusters, "summary": summary}
+
+    except Exception as e:
+        print(f"[WARNING] Clustering failed: {e}")
+        return {
+            "clusters": [{"label": search_term, "keywords": [search_term],
+                          "tweet_indices": list(range(len(tweets))),
+                          "percentage": 100, "count": len(tweets)}],
+            "summary": f"{len(tweets)} tweets (clustering unavailable)"
+        }
+
+
+def calculate_relevancy_score(tweets: list, search_term: str, use_aliases: bool = False) -> tuple:
+    """
+    Multi-signal relevancy scoring v3.1 with 4 weighted signals:
+      - TF-IDF cosine similarity (30%)
+      - Enhanced keyword match (35%) — with optional alias expansion
+      - Hashtag overlap (15%)
+      - Engagement normalization (20%) — log-scaled within batch
+
+    Design decisions (v3.1 fixes):
+      - Influence is computed but stored as METADATA ONLY (badge display).
+        It measures social reach, not topical relevance — including it in
+        weights inflates scores for viral but off-topic tweets.
+      - Conversation heat REMOVED. It's degenerate for live scraping where
+        all tweets arrive within ~5 minutes (uniform heat → zero discrimination).
+      - Percentile normalization REMOVED. It forces scores into a uniform
+        distribution where the average is always ~50, destroying actual signal
+        variance between relevant and irrelevant content.
+      - Spam is FLAGGED as metadata only, not multiplied into scores.
+        Users can see spam badges; scores remain explainable.
+      - Trend score = median of top-25% (not mean of all including spam).
+
     Returns (tweets with scores, overall trend score).
     """
-    import math
-
     error_tracker["nlp_processing"]["status"] = "in_progress"
 
     if not tweets:
@@ -473,6 +908,18 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
         search_lower = search_term.strip().lower()
         search_words = set(search_lower.split()) - stop_words
 
+        # Load aliases if enabled
+        aliases = []
+        if use_aliases:
+            all_aliases = load_aliases()
+            aliases = all_aliases.get(search_lower, [])
+            if aliases:
+                print(f"[NLP] Alias search enabled. Aliases for '{search_term}': {aliases}")
+
+        # Detect search context for spam scoring
+        search_context = classify_search_context(search_term)
+        print(f"[NLP] Search context classified as: {search_context}")
+
         texts = [t.get("text", "") for t in tweets if t.get("text")]
         if not texts:
             print("[WARNING] No valid tweet texts for NLP processing.")
@@ -484,7 +931,11 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
             return tweets, 0
 
         # --- Signal 1: TF-IDF cosine similarity (30%) ---
-        print("[NLP] Signal 1/4: Calculating TF-IDF cosine similarity...")
+        # NOTE: Raw TF-IDF of a 1-2 word query vs full tweets produces tiny values
+        # (0.05-0.15). This compresses 30% of the weight into a narrow band,
+        # causing all scores to cluster around 40. Batch min-max normalization
+        # spreads the values across 0-1 so the best tweet gets ~1.0.
+        print("[NLP] Signal 1/4: TF-IDF cosine similarity...")
         tfidf_scores = [0.0] * len(texts)
         all_docs = [search_term] + texts
         try:
@@ -493,30 +944,46 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
                 tfidf_matrix = vectorizer.fit_transform(all_docs)
                 sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:]).flatten()
                 tfidf_scores = list(sim_scores)
+                # Batch min-max normalization: stretch to 0-1 range
+                tfidf_min = min(tfidf_scores)
+                tfidf_max = max(tfidf_scores)
+                if tfidf_max > tfidf_min:
+                    tfidf_scores = [(s - tfidf_min) / (tfidf_max - tfidf_min) for s in tfidf_scores]
+                    print(f"[NLP] TF-IDF batch-normalized: raw range [{tfidf_min:.3f}, {tfidf_max:.3f}] → [0, 1]")
             else:
-                # All docs identical — give full TF-IDF score
                 tfidf_scores = [1.0] * len(texts)
         except Exception as e_tfidf:
-            print(f"[WARNING] TF-IDF calculation failed: {e_tfidf}. Using fallback.")
+            print(f"[WARNING] TF-IDF calculation failed: {e_tfidf}")
             tfidf_scores = [0.0] * len(texts)
 
-        # --- Signal 2: Keyword presence (30%) ---
-        print("[NLP] Signal 2/4: Keyword presence matching...")
+        # --- Signal 2: Enhanced keyword match (35%) ---
+        print("[NLP] Signal 2/4: Enhanced keyword matching...")
         keyword_scores = []
         for text in texts:
             text_lower = text.lower()
             if search_lower in text_lower:
-                # Exact phrase match
                 keyword_scores.append(1.0)
+            elif use_aliases and aliases:
+                best_alias = max(
+                    (0.8 for a in aliases if a.lower() in text_lower),
+                    default=0.0
+                )
+                if best_alias > 0:
+                    keyword_scores.append(best_alias)
+                elif search_words:
+                    text_words = set(text_lower.split()) - stop_words
+                    overlap = len(search_words & text_words)
+                    keyword_scores.append(min(overlap / len(search_words), 1.0) if search_words else 0.0)
+                else:
+                    keyword_scores.append(0.0)
             elif search_words:
-                # Word-level overlap
                 text_words = set(text_lower.split()) - stop_words
                 overlap = len(search_words & text_words)
                 keyword_scores.append(min(overlap / len(search_words), 1.0))
             else:
                 keyword_scores.append(0.0)
 
-        # --- Signal 3: Hashtag overlap (20%) ---
+        # --- Signal 3: Hashtag overlap (15%) ---
         print("[NLP] Signal 3/4: Hashtag relevancy...")
         hashtag_scores = []
         for i, tweet in enumerate(tweets):
@@ -535,12 +1002,11 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
                 hashtag_scores.append(min(overlap / len(search_words), 1.0))
             else:
                 hashtag_scores.append(0.0)
-        # Pad if needed
         while len(hashtag_scores) < len(texts):
             hashtag_scores.append(0.0)
 
         # --- Signal 4: Engagement normalization (20%) ---
-        print("[NLP] Signal 4/4: Engagement-based relevancy...")
+        print("[NLP] Signal 4/4: Engagement scoring...")
         raw_engagements = []
         for i, tweet in enumerate(tweets):
             if i >= len(texts):
@@ -555,16 +1021,35 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
         if max_eng > 0:
             engagement_scores = [math.log1p(e) / math.log1p(max_eng) for e in raw_engagements]
         else:
-            # No engagement data — give neutral 0.5 so it doesn't penalize
             engagement_scores = [0.5] * len(texts)
 
+        # --- Signal 5: Influence scoring (metadata only, NOT a relevancy weight) ---
+        # Influence measures social reach/resonance — not topical relevance.
+        # Stored per-tweet for badge display but excluded from the combined score.
+        print("[NLP] Computing influence scores (metadata only, not weighted)...")
+        influence_scores = []
+        for i, tweet in enumerate(tweets):
+            if i >= len(texts):
+                break
+            influence_scores.append(calculate_influence(tweet))
+        while len(influence_scores) < len(texts):
+            influence_scores.append(0.0)
+
         # --- Combine signals with weights ---
-        print("[NLP] Combining multi-signal scores (TF-IDF 30%, Keyword 30%, Hashtag 20%, Engagement 20%)...")
+        # NOTE: Only 4 signals are used for relevancy. Influence and conversation
+        # heat are EXCLUDED:
+        #   - Influence: measures social reach, not topical relevance
+        #   - Conv. heat: degenerate for live scraping (all tweets in same ~5min window)
         W_TFIDF = 0.30
-        W_KEYWORD = 0.30
-        W_HASHTAG = 0.20
+        W_KEYWORD = 0.35
+        W_HASHTAG = 0.15
         W_ENGAGEMENT = 0.20
 
+        print(f"[NLP] Combining 4 relevancy signals (TF-IDF {int(W_TFIDF*100)}%, "
+              f"Keyword {int(W_KEYWORD*100)}%, Hashtag {int(W_HASHTAG*100)}%, "
+              f"Engagement {int(W_ENGAGEMENT*100)}%)...")
+
+        raw_scores = []
         for i in range(min(len(texts), len(tweets))):
             combined = (
                 tfidf_scores[i] * W_TFIDF +
@@ -572,17 +1057,75 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
                 hashtag_scores[i] * W_HASHTAG +
                 engagement_scores[i] * W_ENGAGEMENT
             )
-            tweets[i]["relevancy_score"] = int(min(combined * 100, 100))
+            raw_scores.append(combined)
+
+        # --- Spam detection (flag only, NO score modification) ---
+        # Spam used to silently crush scores via multiplication. Now it's
+        # flagged as metadata so the user can see WHY a tweet is suspicious,
+        # without the score becoming an unexplainably low number.
+        print("[NLP] Applying context-aware spam detection (flag-only)...")
+        spam_count = 0
+        for i in range(min(len(raw_scores), len(tweets))):
+            spam_penalty, spam_reasons = calculate_spam_score(tweets[i], search_context, search_term)
+            if spam_penalty > 0:
+                tweets[i]["spam_flag"] = True
+                tweets[i]["spam_reasons"] = spam_reasons
+                tweets[i]["spam_penalty"] = round(spam_penalty, 2)
+                spam_count += 1
+            else:
+                tweets[i]["spam_flag"] = False
+
+        if spam_count > 0:
+            print(f"[NLP] Flagged {spam_count} tweets as potential spam (scores preserved).")
+
+        # --- Detect language per tweet ---
+        # TODO: FUTURE — Multilingual sentiment (VADER only supports English).
+        # Non-English tweets currently receive neutral sentiment scores.
+        # Future options: xml-roberta, language-specific VADER ports, or translation pipeline.
+        print("[NLP] Detecting tweet languages...")
+        lang_counts = {}
+        for tweet in tweets:
+            lang = detect_tweet_language(tweet.get("text", ""))
+            tweet["language"] = lang
+            lang_counts[lang] = lang_counts.get(lang, 0) + 1
+        print(f"[NLP] Language distribution: {dict(sorted(lang_counts.items(), key=lambda x: -x[1])[:5])}")
+
+        # --- Store influence score per tweet (metadata for badge display) ---
+        for i, tweet in enumerate(tweets):
+            if i < len(influence_scores):
+                tweet["influence_score"] = influence_scores[i]
+
+        # --- Direct linear scaling (NO percentile normalization) ---
+        # Percentile normalization was the root cause of 49-score stagnation:
+        # it forces a uniform distribution where avg always = N/2/(N-1) ≈ 50.
+        # This kills actual signal variance — a batch of spam and a batch of
+        # perfectly relevant tweets would both average to 50.
+        #
+        # Instead: scale the raw combined score directly to 0-100.
+        # The combined signal is already 0.0-1.0 (all inputs are 0-1, weights sum to 1).
+        print("[NLP] Applying direct linear scoring (no percentile normalization)...")
+        if raw_scores:
+            for i in range(min(len(raw_scores), len(tweets))):
+                # Direct 0-1 → 0-100 mapping
+                score = int(round(raw_scores[i] * 100))
+                tweets[i]["relevancy_score"] = max(0, min(score, 100))
 
         # Any remaining tweets without scores
         for tweet in tweets:
             if "relevancy_score" not in tweet:
                 tweet["relevancy_score"] = 0
 
-        scores_list = [t.get("relevancy_score", 0) for t in tweets]
-        trend_score = int(sum(scores_list) / len(scores_list)) if scores_list else 0
+        # --- Trend score: median of top-25% (quality of best content, not avg of all) ---
+        scores_list = sorted([t.get("relevancy_score", 0) for t in tweets], reverse=True)
+        if scores_list:
+            top_quartile = scores_list[:max(1, len(scores_list) // 4)]
+            trend_score = top_quartile[len(top_quartile) // 2]  # median of top 25%
+        else:
+            trend_score = 0
 
-        print(f"[NLP] Multi-signal relevancy complete. Overall trend score: {trend_score}")
+        print(f"[NLP] Relevancy complete. Trend score (median top-25%): {trend_score}")
+        print(f"[NLP] Score range: {min(scores_list)}-{max(scores_list)}, "
+              f"mean: {sum(scores_list)//len(scores_list)}")
         error_tracker["nlp_processing"]["status"] = "success"
         return tweets, trend_score
 
@@ -596,6 +1139,7 @@ def calculate_relevancy_score(tweets: list, search_term: str) -> tuple:
             if "relevancy_score" not in tweet:
                 tweet["relevancy_score"] = 0
         return tweets, 0
+
 
 def save_to_yaml(data: dict, filename: str, is_raw: bool = False) -> bool:
     """
@@ -932,7 +1476,7 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             seen_tweet_ids = set()
             last_height = driver.execute_script("return document.body.scrollHeight")
             scroll_attempts = 0
-            max_scroll_attempts = 5 # Reduced to minimize detection
+            max_scroll_attempts = 12  # ~100-120 tweets for better signal-to-noise
             consecutive_no_new_tweets_scrolls = 0
             max_consecutive_no_new_tweets = 3
 
@@ -1041,6 +1585,16 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                         except Exception:
                             tweet_data["engagement_raw"] = []
 
+                        # Extract timestamp from tweet
+                        try:
+                            time_elements = article.find_elements(By.XPATH, ".//time")
+                            if time_elements:
+                                tweet_data["timestamp"] = time_elements[0].get_attribute("datetime")
+                            else:
+                                tweet_data["timestamp"] = None
+                        except Exception:
+                            tweet_data["timestamp"] = None
+
                         if "text" in tweet_data and tweet_data["text"].strip():
                             tweets.append(tweet_data)
                             seen_tweet_ids.add(tweet_data["id"])
@@ -1138,31 +1692,31 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
     log(f"[FAILURE] All {max_retries} attempts failed for '{search_term}'.")
     return []
 
-def run_twitter_analysis_script(search_term):
+def run_twitter_analysis_script(search_term, use_aliases=False):
     """
-    Run the Twitter analysis and yield progress updates.
-    This generator function allows for real-time updates to the frontend.
+    Run the Twitter analysis pipeline and yield progress updates.
+    Enhanced v3: includes 6-signal relevancy, spam detection, language detection,
+    topic clustering, velocity analysis, and influence scoring.
     """
     for step in error_tracker:
         error_tracker[step] = {"status": "not_started", "error": None}
         
     yield f"[START] Analyzing Twitter trend for: '{search_term}'"
     yield "[INFO] This may take a few minutes. Please wait..."
+    if use_aliases:
+        yield "[INFO] Alias search is enabled."
     
     try:
         # Step 1: Scraping tweets
         yield "[STEP 1/5] Scraping and initial deduplicating tweets..."
         raw_tweets = []
         
-        # Create a collector function to capture messages from scraper
         messages = []
         def collect_message(msg):
             messages.append(msg)
         
-        # Run the scraper
         raw_tweets = scrape_twitter_trends(search_term, progress_callback=collect_message)
         
-        # Pass along any collected messages
         for msg in messages:
             yield msg
             
@@ -1180,18 +1734,46 @@ def run_twitter_analysis_script(search_term):
                     raw_fn, is_raw=True)
         yield f"[INFO] Unique raw tweets saved to tweets/raw/{raw_fn}"
         
-        # Step 3: Calculate relevancy scores
-        yield "[STEP 3/5] Calculating relevancy scores..."
-        scored_tweets, trend_score = calculate_relevancy_score(raw_tweets, search_term)
+        # Step 3: Multi-signal analysis & scoring (6 signals + spam + language + influence)
+        yield "[STEP 3/5] Analyzing tweets (6-signal relevancy, spam detection, language, influence)..."
+        scored_tweets, trend_score = calculate_relevancy_score(raw_tweets, search_term, use_aliases=use_aliases)
         
-        # Step 4: Sort tweets by relevancy
-        yield "[STEP 4/5] Sorting tweets by relevancy..."
+        # Count analysis stats for reporting
+        spam_count = sum(1 for t in scored_tweets if t.get("spam_flag"))
+        lang_dist = {}
+        for t in scored_tweets:
+            lang = t.get("language", "en")
+            lang_dist[lang] = lang_dist.get(lang, 0) + 1
+        high_influence = sum(1 for t in scored_tweets if t.get("influence_score", 0) > 0.7)
+        
+        yield f"[INFO] Scored {len(scored_tweets)} tweets. Spam flagged: {spam_count}. High influence: {high_influence}."
+        
+        # Step 4: Clustering & velocity analysis
+        yield "[STEP 4/5] Clustering topics & analyzing velocity..."
+        cluster_data = cluster_tweets(scored_tweets, search_term)
+        velocity_data = calculate_velocity(scored_tweets)
+        
+        yield f"[INFO] {cluster_data['summary']}"
+        yield f"[INFO] Velocity: {velocity_data['velocity_tpm']} tweets/min, direction: {velocity_data['trend_direction']}"
+        
+        # Sort tweets by relevancy
         final_tweets = sorted(scored_tweets, key=lambda x: x.get("relevancy_score", 0), reverse=True)
         
-        # Step 5: Save results
+        # Step 5: Save results (with enhanced data)
         yield "[STEP 5/5] Saving scored results..."
         out_fn = f"{search_term.replace(' ', '_')}_results.yaml"
-        out = {"trend_relevancy": trend_score, "search_term": search_term, "tweets_count": len(final_tweets), "tweets": final_tweets}
+        out = {
+            "trend_relevancy": trend_score,
+            "search_term": search_term,
+            "tweets_count": len(final_tweets),
+            "search_context": classify_search_context(search_term),
+            "velocity": velocity_data,
+            "clusters": cluster_data,
+            "language_distribution": lang_dist,
+            "spam_flagged_count": spam_count,
+            "high_influence_count": high_influence,
+            "tweets": final_tweets
+        }
         save_to_yaml(out, out_fn, is_raw=False)
         yield f"[INFO] Scored results saved to tweets/results/{out_fn}"
         
@@ -1199,6 +1781,7 @@ def run_twitter_analysis_script(search_term):
         yield f"\n[COMPLETE] Analysis for '{search_term}' completed successfully."
         yield f"[RESULTS] Overall trend relevancy score: {trend_score}/100"
         yield f"[RESULTS] Found {len(final_tweets)} relevant tweets."
+        yield f"[RESULTS] Trend velocity: {velocity_data['trend_direction']} ({velocity_data['velocity_tpm']} tpm)"
         
         # Output top tweets
         if final_tweets:
@@ -1209,7 +1792,9 @@ def run_twitter_analysis_script(search_term):
                 username = tweet.get('username', 'unknown_user')
                 text = tweet.get('text', '')[:100] + ('...' if len(tweet.get('text', '')) > 100 else '')
                 score = tweet.get('relevancy_score', 0)
-                yield f"[{score:>3}] {username}: {text}"
+                lang = tweet.get('language', '??')
+                spam_tag = ' ⚠SPAM' if tweet.get('spam_flag') else ''
+                yield f"[{score:>3}] [{lang}]{spam_tag} {username}: {text}"
         
     except Exception as e:
         import traceback

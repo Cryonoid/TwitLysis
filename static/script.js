@@ -1,7 +1,8 @@
 /**
- * TwitLysis v2.1 — Frontend Controller
+ * TwitLysis v3 — Frontend Controller
  * Handles sidebar navigation, step timeline search UI, SSE streaming,
- * enriched trend/result cards, hashtag cloud, Chart.js lifecycle, and memory cleanup.
+ * enriched trend/result cards, hashtag cloud, Chart.js lifecycle, memory cleanup,
+ * v3: alias search, category chips, compare overlay, clusters, velocity, export.
  */
 document.addEventListener('DOMContentLoaded', function () {
 
@@ -29,12 +30,17 @@ document.addEventListener('DOMContentLoaded', function () {
     const STEP_LABELS = [
         'Scraping & Deduplicating',
         'Saving Raw Tweets',
-        'Calculating Relevancy',
-        'Sorting Results',
+        '4-Signal Relevancy Scoring',
+        'Clustering & Velocity Analysis',
         'Saving Results'
     ];
     let currentStepCards = [];
     let currentStepNum = 0;
+
+    // Compare state
+    let selectedForCompare = new Set();
+    // Current term data cache for export/filter
+    let _currentTermData = null;
 
     // =========================================================================
     // Sidebar Panel Navigation
@@ -220,7 +226,8 @@ document.addEventListener('DOMContentLoaded', function () {
         switchPanel('search-panel');
 
         // Start SSE connection
-        activeEventSource = new EventSource(`/api/search?query=${encodeURIComponent(query)}`);
+        const aliasChecked = document.getElementById('alias-checkbox')?.checked ? 'true' : 'false';
+        activeEventSource = new EventSource(`/api/search?query=${encodeURIComponent(query)}&alias=${aliasChecked}`);
 
         activeEventSource.onmessage = function (event) {
             try {
@@ -354,6 +361,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     const preview = result.top_tweet_preview || '';
 
                     card.innerHTML = `
+                        <input type="checkbox" class="result-checkbox" data-term="${escapeHtml(result.term)}" title="Select for comparison">
                         <div class="result-card-top">
                             <div class="result-gauge">
                                 <svg viewBox="0 0 44 44">
@@ -386,6 +394,19 @@ document.addEventListener('DOMContentLoaded', function () {
                         loadTermDetails(result.term);
                         switchPanel('trends-panel');
                     });
+
+                    // Compare checkbox
+                    const chk = card.querySelector('.result-checkbox');
+                    if (chk) {
+                        chk.addEventListener('change', () => {
+                            if (chk.checked) {
+                                selectedForCompare.add(result.term);
+                            } else {
+                                selectedForCompare.delete(result.term);
+                            }
+                            updateCompareFab();
+                        });
+                    }
                 });
                 resultsList.appendChild(frag);
 
@@ -448,6 +469,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 document.getElementById('selected-term-details').style.display = 'block';
                 document.getElementById('no-term-selected').style.display = 'none';
+                _currentTermData = data;
 
                 // Sentiment chart
                 renderSentimentChart('selected-sentiment-chart', data.sentiment);
@@ -464,6 +486,18 @@ document.addEventListener('DOMContentLoaded', function () {
                     badge.className = 'signal-badge none';
                     badge.innerHTML = '';
                 }
+
+                // Velocity badge
+                renderVelocityBadge(data.velocity);
+
+                // Velocity sparkline chart
+                renderVelocityChart(data.velocity);
+
+                // Cluster summary + accordion (pass all_tweets for browsing)
+                renderClusters(data.clusters, data.all_tweets || []);
+
+                // Language filter
+                populateLanguageFilter(data.language_distribution, data.tweets);
 
                 // Tweets
                 const tweetsContainer = document.getElementById('selected-tweets');
@@ -488,12 +522,16 @@ document.addEventListener('DOMContentLoaded', function () {
     function createTweetElement(tweet) {
         const el = document.createElement('div');
         el.className = 'tweet';
+        if (tweet.language) el.dataset.lang = tweet.language;
 
         const username = tweet.username || 'unknown';
         const score = tweet.relevancy_score || 0;
         const text = tweet.text || '';
         const url = tweet.tweet_url || '';
         const eng = tweet.engagement || {};
+        const lang = tweet.language || 'en';
+        const spamFlag = tweet.spam_flag || false;
+        const influence = tweet.influence_score || 0;
 
         let linkHtml = '';
         if (url) {
@@ -511,11 +549,16 @@ document.addEventListener('DOMContentLoaded', function () {
             `;
         }
 
+        let badges = `<span class="lang-badge">${lang}</span>`;
+        if (spamFlag) badges += `<span class="spam-badge"><i class="fas fa-exclamation-triangle"></i> Spam</span>`;
+        if (influence > 0.7) badges += `<span class="influence-badge"><i class="fas fa-bolt"></i> High Influence</span>`;
+
         el.innerHTML = `
             <p class="tweet-text">${escapeHtml(text)}</p>
             <div class="tweet-meta">
                 <span class="tweet-username">${escapeHtml(username)}</span>
                 <span class="tweet-score">Relevancy: ${score}%</span>
+                ${badges}
                 ${linkHtml}
             </div>
             ${engHtml}
@@ -660,6 +703,354 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // =========================================================================
+    // Velocity Badge + Sparkline Chart
+    // =========================================================================
+    function renderVelocityBadge(velocity) {
+        const container = document.getElementById('velocity-badge');
+        if (!container) return;
+        if (!velocity || !velocity.trend_direction || velocity.trend_direction === 'insufficient_data') {
+            container.innerHTML = '';
+            return;
+        }
+        const icons = { surging: 'fa-rocket', growing: 'fa-arrow-trend-up', steady: 'fa-minus', fading: 'fa-arrow-trend-down' };
+        const dir = velocity.trend_direction;
+        container.innerHTML = `
+            <span class="velocity-badge ${dir}">
+                <i class="fas ${icons[dir] || 'fa-minus'}"></i>
+                ${capitalize(dir)}
+                <span class="velocity-tpm">${velocity.velocity_tpm || 0} tpm</span>
+            </span>
+        `;
+    }
+
+    function renderVelocityChart(velocity) {
+        const container = document.getElementById('velocity-chart-container');
+        if (!container) return;
+        if (!velocity || !velocity.timeline_buckets || velocity.timeline_buckets.length < 2) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = 'block';
+        destroyChart('velocity-sparkline-chart');
+
+        const labels = velocity.timeline_buckets.map(b => b.time);
+        const counts = velocity.timeline_buckets.map(b => b.count);
+
+        chartInstances['velocity-sparkline-chart'] = new Chart(
+            document.getElementById('velocity-sparkline-chart'), {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    data: counts,
+                    borderColor: '#1da1f2',
+                    backgroundColor: 'rgba(29,161,242,0.1)',
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 2,
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { color: '#536471', font: { size: 10 } }, grid: { display: false } },
+                    y: { ticks: { color: '#536471', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' }, beginAtZero: true }
+                }
+            }
+        });
+    }
+
+    // =========================================================================
+    // Clusters
+    // =========================================================================
+    function renderClusters(clusterData, allTweets) {
+        const section = document.getElementById('clusters-section');
+        const accordion = document.getElementById('clusters-accordion');
+        const summary = document.getElementById('cluster-summary');
+        if (!section || !accordion) return;
+
+        if (!clusterData || !clusterData.clusters || clusterData.clusters.length <= 1) {
+            section.style.display = 'none';
+            if (summary) summary.innerHTML = '';
+            return;
+        }
+
+        if (summary && clusterData.summary) {
+            summary.innerHTML = `<i class="fas fa-project-diagram" style="margin-right:6px;"></i>${escapeHtml(clusterData.summary)}`;
+        }
+
+        section.style.display = 'block';
+        accordion.innerHTML = '';
+        const frag = document.createDocumentFragment();
+
+        clusterData.clusters.forEach(cluster => {
+            const card = document.createElement('div');
+            card.className = 'cluster-card';
+
+            // Build tweet list HTML for this cluster
+            let clusterTweetsHtml = '';
+            if (allTweets && allTweets.length > 0 && cluster.tweet_indices) {
+                const clusterTweets = cluster.tweet_indices
+                    .map(idx => allTweets.find(t => t.index === idx))
+                    .filter(Boolean)
+                    .sort((a, b) => (b.relevancy_score || 0) - (a.relevancy_score || 0))
+                    .slice(0, 10);  // Show top 10 per cluster
+
+                if (clusterTweets.length > 0) {
+                    clusterTweetsHtml = `<div class="cluster-tweets-list">
+                        ${clusterTweets.map(t => {
+                            const eng = t.engagement || {};
+                            const url = t.tweet_url || '#';
+                            return `<div class="cluster-tweet-item">
+                                <p class="cluster-tweet-text">${escapeHtml(t.text)}</p>
+                                <div class="cluster-tweet-meta">
+                                    <span class="cluster-tweet-user">${escapeHtml(t.username)}</span>
+                                    <span class="relevancy-badge">${t.relevancy_score}%</span>
+                                    <span class="lang-badge">${t.language || 'en'}</span>
+                                    ${t.spam_flag ? '<span class="spam-badge"><i class="fas fa-exclamation-triangle"></i></span>' : ''}
+                                    <span class="cluster-tweet-eng">
+                                        <i class="far fa-comment"></i> ${eng.replies || 0}
+                                        <i class="fas fa-retweet"></i> ${eng.retweets || 0}
+                                        <i class="far fa-heart"></i> ${eng.likes || 0}
+                                    </span>
+                                    ${url !== '#' ? `<a href="${url}" target="_blank" class="view-tweet-link"><i class="fas fa-external-link-alt"></i></a>` : ''}
+                                </div>
+                            </div>`;
+                        }).join('')}
+                    </div>`;
+                }
+            }
+
+            card.innerHTML = `
+                <div class="cluster-header">
+                    <span class="cluster-label">${escapeHtml(cluster.label)}</span>
+                    <div class="cluster-meta">
+                        <span class="cluster-pct">${cluster.percentage}% (${cluster.count})</span>
+                        <div class="cluster-bar"><div class="cluster-bar-fill" style="width:${cluster.percentage}%"></div></div>
+                        <i class="fas fa-chevron-down cluster-chevron"></i>
+                    </div>
+                </div>
+                <div class="cluster-body">
+                    <div class="cluster-keywords">
+                        ${(cluster.keywords || []).map(k => `<span class="cluster-keyword-tag">${escapeHtml(k)}</span>`).join('')}
+                    </div>
+                    ${clusterTweetsHtml || `<span class="cluster-tweet-count">${cluster.count} tweets in this cluster</span>`}
+                </div>
+            `;
+            card.querySelector('.cluster-header').addEventListener('click', () => {
+                card.classList.toggle('expanded');
+            });
+            frag.appendChild(card);
+        });
+        accordion.appendChild(frag);
+    }
+
+    // =========================================================================
+    // Language Filter
+    // =========================================================================
+    function populateLanguageFilter(langDist, tweets) {
+        const sel = document.getElementById('language-filter');
+        if (!sel) return;
+
+        // Reset
+        while (sel.options.length > 1) sel.remove(1);
+
+        if (langDist && Object.keys(langDist).length > 1) {
+            const sorted = Object.entries(langDist).sort((a, b) => b[1] - a[1]);
+            sorted.forEach(([lang, count]) => {
+                const opt = document.createElement('option');
+                opt.value = lang;
+                opt.textContent = `${lang.toUpperCase()} (${count})`;
+                sel.appendChild(opt);
+            });
+        }
+
+        if (!sel._hasFilterListener) {
+            sel.addEventListener('change', () => {
+                const filter = sel.value;
+                const container = document.getElementById('selected-tweets');
+                const tweetElements = container.querySelectorAll('.tweet');
+                tweetElements.forEach(el => {
+                    if (filter === 'all' || el.dataset.lang === filter) {
+                        el.style.display = '';
+                    } else {
+                        el.style.display = 'none';
+                    }
+                });
+            });
+            sel._hasFilterListener = true;
+        }
+        sel.value = 'all';
+    }
+
+    // =========================================================================
+    // Compare
+    // =========================================================================
+    function updateCompareFab() {
+        const fab = document.getElementById('compare-fab');
+        const count = document.getElementById('compare-count');
+        if (selectedForCompare.size >= 2) {
+            fab.style.display = 'block';
+            count.textContent = selectedForCompare.size;
+        } else {
+            fab.style.display = 'none';
+        }
+    }
+
+    document.getElementById('compare-fab')?.addEventListener('click', () => {
+        if (selectedForCompare.size < 2) return;
+        loadComparison(Array.from(selectedForCompare));
+    });
+
+    document.getElementById('close-compare')?.addEventListener('click', () => {
+        document.getElementById('compare-overlay').style.display = 'none';
+    });
+
+    function loadComparison(terms) {
+        const overlay = document.getElementById('compare-overlay');
+        const content = document.getElementById('compare-content');
+        overlay.style.display = 'block';
+        content.innerHTML = '<div class="loading-spinner"><i class="fas fa-spinner fa-spin"></i> Loading comparison...</div>';
+
+        fetch(`/api/compare?terms=${encodeURIComponent(terms.join(','))}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    content.innerHTML = `<p class="no-results">${escapeHtml(data.error)}</p>`;
+                    return;
+                }
+                let html = '<div class="compare-grid">';
+                (data.terms || []).forEach(t => {
+                    const vel = t.velocity || {};
+                    html += `
+                        <div class="compare-card">
+                            <h3>${escapeHtml(t.term)}</h3>
+                            <div class="compare-stat"><span class="label">Tweets</span><span class="value">${t.tweet_count}</span></div>
+                            <div class="compare-stat"><span class="label">Trend Score</span><span class="value">${t.trend_score}/100</span></div>
+                            <div class="compare-stat"><span class="label">Sentiment</span><span class="value">${capitalize(t.sentiment?.signal_strength || 'N/A')} (${(t.sentiment?.avg_compound || 0) > 0 ? '+' : ''}${t.sentiment?.avg_compound || 0})</span></div>
+                            <div class="compare-stat"><span class="label">Velocity</span><span class="value">${capitalize(vel.trend_direction || 'N/A')} (${vel.velocity_tpm || 0} tpm)</span></div>
+                            <div class="compare-stat"><span class="label">Total Likes</span><span class="value">${formatNum(t.total_engagement?.likes || 0)}</span></div>
+                            <div class="compare-stat"><span class="label">Total Retweets</span><span class="value">${formatNum(t.total_engagement?.retweets || 0)}</span></div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+
+                // Shared hashtags
+                if (data.shared_hashtags && data.shared_hashtags.length) {
+                    html += '<div class="compare-card"><h3>Shared Hashtags</h3><div style="display:flex;flex-wrap:wrap;gap:6px;">';
+                    data.shared_hashtags.forEach(h => { html += `<span class="hashtag-pill">${escapeHtml(h)}</span>`; });
+                    html += '</div></div>';
+                }
+
+                content.innerHTML = html;
+            })
+            .catch(err => {
+                content.innerHTML = `<p class="no-results">Failed to load comparison</p>`;
+                console.error('Compare error:', err);
+            });
+    }
+
+    // =========================================================================
+    // Category Chips
+    // =========================================================================
+    function loadCategories() {
+        fetch('/api/categories')
+            .then(r => r.json())
+            .then(data => {
+                const container = document.getElementById('category-chips');
+                if (!container) return;
+                container.innerHTML = '';
+                const frag = document.createDocumentFragment();
+                Object.entries(data).forEach(([category, info]) => {
+                    const chip = document.createElement('button');
+                    chip.className = 'category-chip';
+                    chip.innerHTML = `<span class="chip-icon">${info.icon || '🔍'}</span> ${escapeHtml(category)}`;
+                    chip.title = `${(info.terms || []).length} terms`;
+                    chip.addEventListener('click', () => {
+                        const terms = info.terms || [];
+                        if (terms.length > 0) {
+                            const randomTerm = terms[Math.floor(Math.random() * terms.length)];
+                            searchQueryInput.value = randomTerm;
+                            searchQueryInput.focus();
+                        }
+                    });
+                    frag.appendChild(chip);
+                });
+                container.appendChild(frag);
+            })
+            .catch(() => {});
+    }
+
+    // =========================================================================
+    // Export
+    // =========================================================================
+    const exportBtn = document.getElementById('export-btn');
+    const exportMenu = document.getElementById('export-menu');
+
+    if (exportBtn) {
+        exportBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            exportMenu.style.display = exportMenu.style.display === 'none' ? 'block' : 'none';
+        });
+    }
+    document.addEventListener('click', () => {
+        if (exportMenu) exportMenu.style.display = 'none';
+    });
+
+    if (exportMenu) {
+        exportMenu.querySelectorAll('button[data-format]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const format = btn.dataset.format;
+                const term = document.getElementById('term-select')?.value;
+                if (!term) return;
+                handleExport(term, format);
+                exportMenu.style.display = 'none';
+            });
+        });
+    }
+
+    function handleExport(term, format) {
+        const url = `/api/export?term=${encodeURIComponent(term)}&format=${format}`;
+
+        if (format === 'csv' || format === 'json') {
+            // Direct download
+            if (format === 'csv') {
+                window.location.href = url;
+            } else {
+                fetch(url).then(r => r.blob()).then(blob => {
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `${term}_export.json`;
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                });
+            }
+        } else if (format === 'md') {
+            fetch(url).then(r => r.json()).then(data => {
+                if (data.markdown) {
+                    navigator.clipboard.writeText(data.markdown).then(() => {
+                        alert('Markdown report copied to clipboard!');
+                    });
+                }
+            });
+        } else if (format === 'html') {
+            fetch(url).then(r => r.json()).then(data => {
+                const htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>TwitLysis Report: ${escapeHtml(data.term || term)}</title><style>body{font-family:Inter,sans-serif;background:#0e1621;color:#e7e9ea;padding:40px;max-width:800px;margin:0 auto}.header{border-bottom:1px solid #2f3336;padding-bottom:20px;margin-bottom:20px}h1{color:#1da1f2;font-size:1.6rem}.stat{display:inline-block;margin-right:20px;font-size:0.9rem;color:#8899a6}.tweet{background:rgba(25,39,52,0.7);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:16px;margin-bottom:12px}.score{color:#1da1f2;font-weight:600}</style></head><body><div class="header"><h1>TwitLysis Report: "${escapeHtml(data.term || term)}"</h1><div><span class="stat">Score: ${data.trend_score}/100</span><span class="stat">Tweets: ${data.tweet_count}</span></div></div>${(data.top_tweets || []).map(t => `<div class="tweet"><p>${escapeHtml(t.text || '')}</p><div><span class="score">[${t.score}%]</span> ${escapeHtml(t.username || '')}</div></div>`).join('')}<p style="color:#536471;margin-top:30px;font-size:0.8rem">Generated by TwitLysis • ${new Date().toLocaleDateString()}</p></body></html>`;
+                const blob = new Blob([htmlContent], { type: 'text/html' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `${term}_report.html`;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            });
+        }
+    }
+
+    // =========================================================================
     // Utilities
     // =========================================================================
     function escapeHtml(str) {
@@ -716,4 +1107,5 @@ document.addEventListener('DOMContentLoaded', function () {
     // =========================================================================
     loadPreviousResults();
     loadTrends();
+    loadCategories();
 });
