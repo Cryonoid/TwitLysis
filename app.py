@@ -47,8 +47,8 @@ def _parse_engagement(tweet):
         label_lower = label.lower()
         # Extract number from strings like "12 likes", "1,542 views"
         parts = label.replace(",", "").split()
-        if len(parts) >= 2 and parts[0].isdigit():
-            num = int(parts[0])
+        if len(parts) >= 2 and parts[0].lstrip('-').isdigit():
+            num = max(0, int(parts[0]))
             if "repl" in label_lower:
                 result["replies"] = num
             elif "repost" in label_lower or "retweet" in label_lower:
@@ -147,9 +147,14 @@ def get_term_details():
         all_raw_tweets = data.get('tweets', [])
         sentiment = calculate_sentiment(all_raw_tweets)
         
-        # Return top 25 most relevant tweets (was 10)
+        # Return top 25 most relevant tweets — exclude near-empty tweets (< 15 chars)
+        # and ultra-long aggregate spam (> 1500 chars) from display
+        filtered_tweets = [
+            t for t in all_raw_tweets
+            if 15 <= len(t.get('text', '')) <= 1500
+        ]
         top_tweets = sorted(
-            all_raw_tweets,
+            filtered_tweets,
             key=lambda t: t.get('relevancy_score', 0),
             reverse=True
         )[:25]
@@ -241,7 +246,7 @@ def get_trends():
                             "velocity": data.get('velocity', {})
                         }
                         all_tweets.extend(tweets)
-                except:
+                except Exception:
                     continue
         
         # Build enriched trend objects sorted by tweet count
@@ -291,7 +296,7 @@ def get_hashtags():
                             # Count unique hashtags in this tweet
                             if tweet_hashtags:
                                 hashtags_counter.update(tweet_hashtags)
-                except:
+                except Exception:
                     continue
     
     # Convert to format expected by frontend
@@ -335,7 +340,7 @@ def get_previous_results():
                         "avg_compound": sentiment.get("avg_compound", 0),
                         "top_tweet_preview": top_tweet_preview
                     })
-                except:
+                except Exception:
                     continue
     
     # Sort by date, newest first
@@ -371,8 +376,8 @@ def calculate_sentiment(tweets):
             continue
         
         # Skip VADER for non-English tweets (returns neutral)
-        lang = tweet.get('language', 'en')
-        if lang != 'en' and lang not in ('en', ''):
+        lang = tweet.get('language', 'en') or 'en'
+        if lang not in ('en', ''):
             neutral += 1
             continue
         
@@ -469,7 +474,7 @@ def compare_terms():
                 "velocity": data.get('velocity', {})
             })
         except Exception:
-            continue
+            continue  # Skip files that can't be parsed
     
     # Calculate shared and unique hashtags
     if len(all_hashtags) >= 2:

@@ -7,6 +7,48 @@
 document.addEventListener('DOMContentLoaded', function () {
 
     // =========================================================================
+    // Toast Notifications (replaces browser alert())
+    // =========================================================================
+    function showToast(message, type = 'success', duration = 3000) {
+        const existing = document.getElementById('tl-toast');
+        if (existing) existing.remove();
+
+        const toast = document.createElement('div');
+        toast.id = 'tl-toast';
+        const iconMap = { success: 'fa-check-circle', error: 'fa-exclamation-circle', info: 'fa-info-circle' };
+        toast.innerHTML = `<i class="fas ${iconMap[type] || 'fa-info-circle'}"></i> ${escapeHtmlBasic(message)}`;
+        toast.style.cssText = [
+            'position:fixed', 'bottom:32px', 'left:50%', 'transform:translateX(-50%) translateY(20px)',
+            'background:var(--bg-elevated)', 'color:var(--text-primary)',
+            'border:1px solid var(--border)', 'border-radius:30px',
+            'padding:10px 22px', 'font-size:0.85rem', 'font-family:var(--font)',
+            'box-shadow:0 8px 28px rgba(0,0,0,0.4)', 'z-index:9999',
+            'display:flex', 'align-items:center', 'gap:8px',
+            'transition:opacity 0.3s ease, transform 0.3s ease', 'opacity:0'
+        ].join(';');
+        const colorMap = { success: 'var(--success)', error: 'var(--error)', info: 'var(--primary)' };
+        toast.querySelector('i').style.color = colorMap[type] || 'var(--primary)';
+        document.body.appendChild(toast);
+
+        // Animate in
+        requestAnimationFrame(() => {
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateX(-50%) translateY(0)';
+        });
+
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(-50%) translateY(12px)';
+            setTimeout(() => toast.remove(), 350);
+        }, duration);
+    }
+
+    // Simple HTML escaper for toast (before full escapeHtml is defined)
+    function escapeHtmlBasic(str) {
+        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // =========================================================================
     // DOM References
     // =========================================================================
     const searchQueryInput = document.getElementById('search-query');
@@ -532,6 +574,8 @@ document.addEventListener('DOMContentLoaded', function () {
         const lang = tweet.language || 'en';
         const spamFlag = tweet.spam_flag || false;
         const influence = tweet.influence_score || 0;
+        // Flag overly long tweets (aggregate/spam pattern)
+        const isLongForm = text.length > 800;
 
         let linkHtml = '';
         if (url) {
@@ -552,6 +596,7 @@ document.addEventListener('DOMContentLoaded', function () {
         let badges = `<span class="lang-badge">${lang}</span>`;
         if (spamFlag) badges += `<span class="spam-badge"><i class="fas fa-exclamation-triangle"></i> Spam</span>`;
         if (influence > 0.7) badges += `<span class="influence-badge"><i class="fas fa-bolt"></i> High Influence</span>`;
+        if (isLongForm) badges += `<span class="spam-badge" title="This tweet is unusually long — may be an aggregate/digest post"><i class="fas fa-align-left"></i> Long-form</span>`;
 
         el.innerHTML = `
             <p class="tweet-text">${escapeHtml(text)}</p>
@@ -1032,9 +1077,9 @@ document.addEventListener('DOMContentLoaded', function () {
         } else if (format === 'md') {
             fetch(url).then(r => r.json()).then(data => {
                 if (data.markdown) {
-                    navigator.clipboard.writeText(data.markdown).then(() => {
-                        alert('Markdown report copied to clipboard!');
-                    });
+                    navigator.clipboard.writeText(data.markdown)
+                        .then(() => showToast('Markdown report copied to clipboard!', 'success'))
+                        .catch(() => showToast('Clipboard access denied — check browser permissions', 'error'));
                 }
             });
         } else if (format === 'html') {

@@ -27,6 +27,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
 from webdriver_manager.chrome import ChromeDriverManager
 
 # Output directory paths
@@ -287,6 +288,205 @@ def simulate_human_behavior(driver):
     except Exception:
         # Silently pass — human simulation failure is harmless and non-blocking
         pass
+
+def is_element_stale(element):
+    """
+    Check if a selenium WebElement has become stale (detached from the DOM).
+    """
+    try:
+        if not element:
+            return True
+        _ = element.tag_name
+        return False
+    except Exception:
+        return True
+
+def get_fresh_container(driver, container):
+    """
+    Ensure the scrollable container reference is fresh and not stale.
+    If the current container is the top-level fallback (html or body),
+    try to re-resolve in case the actual scrollable feed container has rendered.
+    """
+    if not container or is_element_stale(container):
+        return get_scroll_container(driver)
+    
+    try:
+        tag_name = container.tag_name.lower()
+        if tag_name in ['html', 'body']:
+            better_container = get_scroll_container(driver)
+            if better_container:
+                better_tag = better_container.tag_name.lower()
+                if better_tag not in ['html', 'body']:
+                    return better_container
+    except Exception:
+        pass
+        
+    return container
+
+def smooth_scroll_down(driver, container=None, distance=800, steps=12):
+    """
+    Scroll the window or specific container down smoothly in small increments to simulate human scrolling.
+    This triggers intersection observers and renders virtualized content naturally.
+    """
+    try:
+        container = get_fresh_container(driver, container)
+        is_window_scroll = True
+        if container:
+            try:
+                tag_name = container.tag_name.lower()
+                if tag_name not in ['html', 'body']:
+                    is_window_scroll = False
+            except Exception:
+                pass
+
+        step_size = distance / steps
+        for _ in range(steps):
+            jitter = random.uniform(-10, 10)
+            current_step = max(1, int(step_size + jitter))
+            if not is_window_scroll:
+                container = get_fresh_container(driver, container)
+                try:
+                    driver.execute_script("arguments[0].scrollBy(0, arguments[1]);", container, current_step)
+                except Exception:
+                    pass
+                try:
+                    driver.execute_script(f"window.scrollBy(0, {current_step});")
+                except Exception:
+                    pass
+            else:
+                try:
+                    driver.execute_script(f"window.scrollBy(0, {current_step});")
+                except Exception:
+                    pass
+            time.sleep(random.uniform(0.04, 0.08))
+    except Exception:
+        pass
+
+def get_scroll_container(driver):
+    """
+    Find the actual scrollable element in the page (could be main, div, body etc.)
+    Uses tweet ancestor traversal to locate the scrollable container.
+    """
+    js_find_container = """
+    // Try to find the scrollable ancestor of a tweet first (most accurate)
+    var tweet = document.querySelector('article[data-testid="tweet"]');
+    if (tweet) {
+        var parent = tweet.parentElement;
+        while (parent && parent !== document.body) {
+            if (parent.classList && parent.classList.contains('r-150rngu')) {
+                return parent;
+            }
+            var style = window.getComputedStyle(parent);
+            if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                return parent;
+            }
+            parent = parent.parentElement;
+        }
+    }
+
+    // Direct lookup for X.com's scroll column
+    var r150 = document.querySelector('.r-150rngu');
+    if (r150) {
+        return r150;
+    }
+
+    // Lookup for primary column wrapper
+    var primaryCol = document.querySelector('[data-testid="primaryColumn"]');
+    if (primaryCol) {
+        var parent = primaryCol.parentElement;
+        while (parent && parent !== document.body) {
+            var style = window.getComputedStyle(parent);
+            if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                return parent;
+            }
+            parent = parent.parentElement;
+        }
+    }
+
+    return document.scrollingElement || document.documentElement || document.body;
+    """
+    try:
+        return driver.execute_script(js_find_container)
+    except Exception:
+        return None
+
+def get_container_scroll_height(driver, container):
+    """
+    Get the scrollHeight of the scrollable container or document.body.
+    """
+    try:
+        container = get_fresh_container(driver, container)
+        win_height = driver.execute_script("return document.body.scrollHeight || document.documentElement.scrollHeight || 0;")
+        if not container:
+            return win_height
+        try:
+            cont_height = driver.execute_script("return arguments[0].scrollHeight;", container)
+            return max(win_height, cont_height)
+        except Exception:
+            return win_height
+    except Exception:
+        return 0
+
+def get_container_scroll_position(driver, container):
+    """
+    Get the current vertical scroll position of the container or window (active target only).
+    """
+    try:
+        container = get_fresh_container(driver, container)
+        win_pos = driver.execute_script("return window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;")
+        is_window_scroll = True
+        if container:
+            try:
+                tag_name = container.tag_name.lower()
+                if tag_name not in ['html', 'body']:
+                    is_window_scroll = False
+            except Exception:
+                pass
+        
+        if is_window_scroll:
+            return win_pos
+        else:
+            try:
+                cont_pos = driver.execute_script("return arguments[0].scrollTop || 0;", container)
+                return max(win_pos, cont_pos)
+            except Exception:
+                return win_pos
+    except Exception:
+        return 0
+
+def get_container_scroll_potential(driver, container):
+    """
+    Get the remaining scrollable distance (potential) of the container or window.
+    """
+    try:
+        container = get_fresh_container(driver, container)
+        win_height = driver.execute_script("return document.documentElement.scrollHeight || document.body.scrollHeight || 0;")
+        win_client = driver.execute_script("return window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight || 0;")
+        win_top = driver.execute_script("return window.pageYOffset || window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;")
+        win_potential = max(0, win_height - win_client - win_top)
+        
+        is_window_scroll = True
+        if container:
+            try:
+                tag_name = container.tag_name.lower()
+                if tag_name not in ['html', 'body']:
+                    is_window_scroll = False
+            except Exception:
+                pass
+        
+        if is_window_scroll:
+            return win_potential
+        else:
+            try:
+                cont_height = driver.execute_script("return arguments[0].scrollHeight || 0;", container)
+                cont_client = driver.execute_script("return arguments[0].clientHeight || 0;", container)
+                cont_top = driver.execute_script("return arguments[0].scrollTop || 0;", container)
+                cont_potential = max(0, cont_height - cont_client - cont_top)
+                return max(win_potential, cont_potential)
+            except Exception:
+                return win_potential
+    except Exception:
+        return 0
 
 def get_chrome_version():
     """
@@ -959,29 +1159,51 @@ def calculate_relevancy_score(tweets: list, search_term: str, use_aliases: bool 
         # --- Signal 2: Enhanced keyword match (35%) ---
         print("[NLP] Signal 2/4: Enhanced keyword matching...")
         keyword_scores = []
+        # For short queries (≤4 chars, e.g. "sol", "eth", "btc"), use word-boundary
+        # matching to avoid false positives like "sol" matching "solution", "console".
+        use_word_boundary = len(search_lower.replace(" ", "")) <= 4
+        # Build a compiled pattern for word-boundary matching (handles $SOL, #Solana, SOL, sol etc.)
+        if use_word_boundary:
+            _wb_pattern = re.compile(
+                r'(?<![a-z0-9#$])' + re.escape(search_lower) + r'(?![a-z0-9])',
+                re.IGNORECASE
+            )
+            # Also match ticker variants: $SOL, #sol*, SOL
+            _ticker_pattern = re.compile(
+                r'(?:\$' + re.escape(search_lower) + r'|\#' + re.escape(search_lower) + r'\w*)',
+                re.IGNORECASE
+            )
         for text in texts:
-            text_lower = text.lower()
-            if search_lower in text_lower:
-                keyword_scores.append(1.0)
-            elif use_aliases and aliases:
-                best_alias = max(
-                    (0.8 for a in aliases if a.lower() in text_lower),
-                    default=0.0
-                )
-                if best_alias > 0:
-                    keyword_scores.append(best_alias)
+            text_lower_t = text.lower()
+            matched = False
+            if use_word_boundary:
+                if _wb_pattern.search(text) or _ticker_pattern.search(text):
+                    keyword_scores.append(1.0)
+                    matched = True
+            else:
+                if search_lower in text_lower_t:
+                    keyword_scores.append(1.0)
+                    matched = True
+            if not matched:
+                if use_aliases and aliases:
+                    best_alias = max(
+                        (0.8 for a in aliases if a.lower() in text_lower_t),
+                        default=0.0
+                    )
+                    if best_alias > 0:
+                        keyword_scores.append(best_alias)
+                    elif search_words:
+                        text_words = set(text_lower_t.split()) - stop_words
+                        overlap = len(search_words & text_words)
+                        keyword_scores.append(min(overlap / len(search_words), 1.0) if search_words else 0.0)
+                    else:
+                        keyword_scores.append(0.0)
                 elif search_words:
-                    text_words = set(text_lower.split()) - stop_words
+                    text_words = set(text_lower_t.split()) - stop_words
                     overlap = len(search_words & text_words)
-                    keyword_scores.append(min(overlap / len(search_words), 1.0) if search_words else 0.0)
+                    keyword_scores.append(min(overlap / len(search_words), 1.0))
                 else:
                     keyword_scores.append(0.0)
-            elif search_words:
-                text_words = set(text_lower.split()) - stop_words
-                overlap = len(search_words & text_words)
-                keyword_scores.append(min(overlap / len(search_words), 1.0))
-            else:
-                keyword_scores.append(0.0)
 
         # --- Signal 3: Hashtag overlap (15%) ---
         print("[NLP] Signal 3/4: Hashtag relevancy...")
@@ -1108,6 +1330,10 @@ def calculate_relevancy_score(tweets: list, search_term: str, use_aliases: bool 
             for i in range(min(len(raw_scores), len(tweets))):
                 # Direct 0-1 → 0-100 mapping
                 score = int(round(raw_scores[i] * 100))
+                # Bonus for Top tab tweets: Twitter's algorithm already curated these
+                # as higher quality/engagement, so they deserve a relevancy uplift
+                if tweets[i].get("source_tab") == "top":
+                    score += 8
                 tweets[i]["relevancy_score"] = max(0, min(score, 100))
 
         # Any remaining tweets without scores
@@ -1200,7 +1426,122 @@ def build_failure_summary() -> str:
     details = "; ".join([f"{step}: {err}" for step, err in failed])
     return f"Root cause: {root_step} -> {root_error}. Failed steps: {details}"
 
-def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, progress_callback=None) -> list:
+def extract_visible_tweets(driver, seen_tweet_ids, tweets, error_tracker, search_term, attempt, log) -> int:
+    """
+    Extract currently visible tweets from the DOM, adding any new ones to tweets and seen_tweet_ids.
+    Returns the number of new tweets found in this pass.
+    """
+    tweets_found_this_pass = 0
+    try:
+        error_tracker["tweet_extraction"]["status"] = "in_progress"
+        articles = driver.find_elements(By.XPATH, "//article[@data-testid='tweet']")
+
+        for article in articles:
+            tweet_data = {}
+            tweet_id = None
+            try:
+                status_links = article.find_elements(By.XPATH, ".//a[contains(@href, '/status/')]")
+                for link_el in status_links:
+                    href = link_el.get_attribute('href')
+                    if href and '/status/' in href:
+                        potential_id = href.split('/status/')[-1].split('?')[0]
+                        if potential_id.isdigit():
+                            tweet_id = potential_id
+                            tweet_data["tweet_url"] = href.split('?')[0]
+                            break
+                if tweet_id and tweet_id in seen_tweet_ids:
+                    continue
+                tweet_data["id"] = tweet_id
+            except Exception:
+                pass
+
+            if not tweet_id:
+                pass
+
+            try:
+                text_elements = article.find_elements(By.XPATH, ".//div[@data-testid='tweetText']")
+                if text_elements:
+                    tweet_data["text"] = text_elements[0].text
+                else:
+                    lang_divs = article.find_elements(By.XPATH, ".//div[@lang]")
+                    if lang_divs:
+                        tweet_data["text"] = lang_divs[0].text
+                    else:
+                        continue
+            except NoSuchElementException:
+                continue
+            except Exception:
+                continue
+
+            if not tweet_id and "text" in tweet_data:
+                tweet_id = f"hash_{hash(tweet_data['text'][:50])}"
+                if tweet_id in seen_tweet_ids:
+                    continue
+                tweet_data["id"] = tweet_id
+
+            if not tweet_data.get("id"):
+                continue
+
+            try:
+                user_name_elements = article.find_elements(By.XPATH, ".//div[@data-testid='User-Name']//span[contains(text(), '@')]")
+                if user_name_elements:
+                    tweet_data["username"] = user_name_elements[0].text
+                else:
+                    user_name_block = article.find_elements(By.XPATH, ".//div[@data-testid='User-Name']")
+                    if user_name_block:
+                        tweet_data["username"] = user_name_block[0].text.split('\n')[0]
+                    else:
+                        tweet_data["username"] = "unknown_user"
+            except Exception:
+                tweet_data["username"] = "unknown_user_exception"
+
+            # Ensure tweet_url exists via fallback construction
+            if not tweet_data.get("tweet_url") and tweet_data.get("username") and tweet_id:
+                clean_user = tweet_data["username"].lstrip("@")
+                if clean_user and tweet_id and not tweet_id.startswith("hash_"):
+                    tweet_data["tweet_url"] = f"https://x.com/{clean_user}/status/{tweet_id}"
+
+            try:
+                hashtag_links = article.find_elements(By.XPATH, ".//a[contains(@href, '/hashtag/')]")
+                tweet_data["hashtags"] = [link.text for link in hashtag_links if link.text.startswith('#')]
+            except Exception:
+                tweet_data["hashtags"] = []
+
+            # Extract engagement metrics (likes, retweets, replies) — best effort
+            try:
+                group_els = article.find_elements(By.XPATH, ".//div[@role='group']//button")
+                metrics = []
+                for btn in group_els:
+                    aria = btn.get_attribute("aria-label") or ""
+                    if aria:
+                        metrics.append(aria)
+                tweet_data["engagement_raw"] = metrics
+            except Exception:
+                tweet_data["engagement_raw"] = []
+
+            # Extract timestamp from tweet
+            try:
+                time_elements = article.find_elements(By.XPATH, ".//time")
+                if time_elements:
+                    tweet_data["timestamp"] = time_elements[0].get_attribute("datetime")
+                else:
+                    tweet_data["timestamp"] = None
+            except Exception:
+                tweet_data["timestamp"] = None
+
+            if "text" in tweet_data and tweet_data["text"].strip():
+                tweets.append(tweet_data)
+                seen_tweet_ids.add(tweet_data["id"])
+                tweets_found_this_pass += 1
+
+        error_tracker["tweet_extraction"]["status"] = "success"
+    except Exception as e:
+        log(f"[ERROR] Error during visible tweet extraction: {str(e)}")
+        error_tracker["tweet_extraction"]["status"] = "partial"
+        error_tracker["tweet_extraction"]["error"] = str(e)
+    return tweets_found_this_pass
+
+def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, progress_callback=None, search_tab="live") -> list:
     """
     Scrape tweets related to the search term from X with enhanced anti-ban features.
     Returns a list of tweet dictionaries or empty list if failed.
@@ -1363,27 +1704,18 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                         "path": "/",
                     })
                     if cookies.get("ct0"):
+                        ct0_val = cookies["ct0"]
+                        if isinstance(ct0_val, list):
+                            ct0_val = ct0_val[0] if ct0_val else ""
                         driver.add_cookie({
                             "name": "ct0",
-                            "value": cookies["ct0"],
+                            "value": str(ct0_val).strip(),
                             "domain": ".x.com",
                             "secure": True,
                             "httpOnly": False,
                             "path": "/",
                         })
                     log("[AUTH] Cookies applied successfully.")
-                    driver.refresh()
-                    time.sleep(random.uniform(2, 4))
-                    simulate_human_behavior(driver)
-
-                    error_tracker["auth_verification"]["status"] = "in_progress"
-                    auth_ok, auth_reason = verify_authenticated_session(driver, search_term, attempt, log)
-                    if not auth_ok:
-                        error_tracker["auth_verification"]["status"] = "failed"
-                        error_tracker["auth_verification"]["error"] = auth_reason
-                        log(f"[ERROR] {auth_reason}")
-                        attempt += 1
-                        continue
                     error_tracker["auth_verification"]["status"] = "success"
                 except Exception as e:
                     log(f"[ERROR] Failed to set cookies: {str(e)}")
@@ -1398,7 +1730,10 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
 
             # Page Load with CAPTCHA Detection
             error_tracker["page_load"]["status"] = "in_progress"
-            url = f"https://x.com/search?q={urllib.parse.quote(search_term)}&src=typed_query&f=live"
+            if search_tab == "top":
+                url = f"https://x.com/search?q={urllib.parse.quote(search_term)}&src=typed_query"
+            else:
+                url = f"https://x.com/search?q={urllib.parse.quote(search_term)}&src=typed_query&f=live"
             log(f"[NETWORK] Accessing URL: {url}")
 
             try:
@@ -1476,131 +1811,81 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             seen_tweet_ids = set()
             last_height = driver.execute_script("return document.body.scrollHeight")
             scroll_attempts = 0
-            max_scroll_attempts = 12  # ~100-120 tweets for better signal-to-noise
+            max_scroll_attempts = 15
             consecutive_no_new_tweets_scrolls = 0
-            max_consecutive_no_new_tweets = 3
+            max_consecutive_no_new_tweets = 5
 
             log("[SCRAPE] Starting to scroll and collect tweets...")
             error_tracker["page_scroll"]["status"] = "in_progress"
+            scrape_start_time = time.time()
+            SCRAPE_TIMEOUT_SECONDS = 300  # 5-minute wall-clock guard
+
+            # Extract tweets already visible on initial page load before scrolling
+            initial_tweets = extract_visible_tweets(
+                driver, seen_tweet_ids, tweets, error_tracker,
+                search_term, attempt, log
+            )
+            if initial_tweets > 0:
+                log(f"[SCRAPE] Initial extraction: Found {initial_tweets} tweets before scrolling.")
 
             while scroll_attempts < max_scroll_attempts and requests_made < rate_limit_requests:
                 scroll_attempts += 1
                 requests_made += 1
                 tweets_found_this_scroll_pass = 0
+
+                # Wall-clock timeout guard
+                elapsed = time.time() - scrape_start_time
+                if elapsed > SCRAPE_TIMEOUT_SECONDS:
+                    log(f"[SCRAPE] Wall-clock timeout ({SCRAPE_TIMEOUT_SECONDS}s) reached after {scroll_attempts-1} scrolls. Stopping with {len(tweets)} tweets.")
+                    break
+
                 try:
+                    # Dismiss cookie banners
+                    try:
+                        cookie_btn = driver.find_element(By.XPATH, "//span[contains(text(), 'Refuse non-essential') or contains(text(), 'Accept all')]")
+                        if cookie_btn.is_displayed():
+                            cookie_btn.click()
+                    except Exception:
+                        pass
+
+                    # Phase 1: Incremental scrollBy steps — capture virtualized tweets
+                    for _ in range(5):
+                        scroll_distance = random.randint(500, 700)
+                        driver.execute_script(f"window.scrollBy(0, {scroll_distance});")
+                        time.sleep(random.uniform(0.8, 1.5))
+                        new_extracted = extract_visible_tweets(
+                            driver, seen_tweet_ids, tweets, error_tracker,
+                            search_term, attempt, log
+                        )
+                        tweets_found_this_scroll_pass += new_extracted
+
+                    # Phase 2: scrollTo(bottom) kick — triggers intersection observer
+                    # sentinel at the very bottom to load the next batch of tweets
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(random.uniform(3, 5))
+
+                    # Phase 3: Wait for DOM mutation — poll scrollHeight for up to 5s
+                    # instead of a blind sleep. Proceed immediately when content loads.
+                    pre_kick_height = driver.execute_script("return document.body.scrollHeight")
+                    content_loaded = False
+                    for _ in range(10):  # 10 polls × 500ms = 5s max
+                        time.sleep(0.5)
+                        current_height = driver.execute_script("return document.body.scrollHeight")
+                        if current_height > pre_kick_height:
+                            content_loaded = True
+                            break
+                    
+                    if content_loaded:
+                        # New content appeared — extract immediately
+                        new_extracted = extract_visible_tweets(
+                            driver, seen_tweet_ids, tweets, error_tracker,
+                            search_term, attempt, log
+                        )
+                        tweets_found_this_scroll_pass += new_extracted
+
+                    # Human-like pause + rate limit respect
+                    time.sleep(random.uniform(1.5, 3.0))
                     time.sleep(request_delay)
                     simulate_human_behavior(driver)
-
-                    error_tracker["tweet_extraction"]["status"] = "in_progress"
-                    articles = driver.find_elements(By.XPATH, "//article[@data-testid='tweet']")
-
-                    if not articles and scroll_attempts == 1:
-                        log("[WARNING] No tweet articles found immediately after page load.")
-                        save_debug_html(driver.page_source, search_term, attempt, "no_articles")
-
-                    for article in articles:
-                        tweet_data = {}
-                        tweet_id = None
-                        try:
-                            status_links = article.find_elements(By.XPATH, ".//a[contains(@href, '/status/')]")
-                            for link_el in status_links:
-                                href = link_el.get_attribute('href')
-                                if href and '/status/' in href:
-                                    potential_id = href.split('/status/')[-1].split('?')[0]
-                                    if potential_id.isdigit():
-                                        tweet_id = potential_id
-                                        tweet_data["tweet_url"] = href.split('?')[0]
-                                        break
-                            if tweet_id and tweet_id in seen_tweet_ids:
-                                continue
-                            tweet_data["id"] = tweet_id
-                        except Exception:
-                            pass
-
-                        if not tweet_id:
-                            pass
-
-                        try:
-                            text_elements = article.find_elements(By.XPATH, ".//div[@data-testid='tweetText']")
-                            if text_elements:
-                                tweet_data["text"] = text_elements[0].text
-                            else:
-                                lang_divs = article.find_elements(By.XPATH, ".//div[@lang]")
-                                if lang_divs:
-                                    tweet_data["text"] = lang_divs[0].text
-                                else:
-                                    continue
-                        except NoSuchElementException:
-                            continue
-                        except Exception:
-                            continue
-
-                        if not tweet_id and "text" in tweet_data:
-                            tweet_id = f"hash_{hash(tweet_data['text'][:50])}"
-                            if tweet_id in seen_tweet_ids:
-                                continue
-                            tweet_data["id"] = tweet_id
-
-                        # Ensure tweet_url exists via fallback construction
-                        if not tweet_data.get("tweet_url") and tweet_data.get("username") and tweet_id:
-                            clean_user = tweet_data["username"].lstrip("@")
-                            if clean_user and tweet_id and not tweet_id.startswith("hash_"):
-                                tweet_data["tweet_url"] = f"https://x.com/{clean_user}/status/{tweet_id}"
-
-                        if not tweet_data.get("id"):
-                            continue
-
-                        try:
-                            user_name_elements = article.find_elements(By.XPATH, ".//div[@data-testid='User-Name']//span[contains(text(), '@')]")
-                            if user_name_elements:
-                                tweet_data["username"] = user_name_elements[0].text
-                            else:
-                                user_name_block = article.find_elements(By.XPATH, ".//div[@data-testid='User-Name']")
-                                if user_name_block:
-                                    tweet_data["username"] = user_name_block[0].text.split('\n')[0]
-                                else:
-                                    tweet_data["username"] = "unknown_user"
-                        except Exception:
-                            tweet_data["username"] = "unknown_user_exception"
-
-                        try:
-                            hashtag_links = article.find_elements(By.XPATH, ".//a[contains(@href, '/hashtag/')]")
-                            tweet_data["hashtags"] = [link.text for link in hashtag_links if link.text.startswith('#')]
-                        except Exception:
-                            tweet_data["hashtags"] = []
-
-                        # Extract engagement metrics (likes, retweets, replies) — best effort
-                        try:
-                            group_els = article.find_elements(
-                                By.XPATH, ".//div[@role='group']//button"
-                            )
-                            metrics = []
-                            for btn in group_els:
-                                aria = btn.get_attribute("aria-label") or ""
-                                if aria:
-                                    metrics.append(aria)
-                            tweet_data["engagement_raw"] = metrics
-                        except Exception:
-                            tweet_data["engagement_raw"] = []
-
-                        # Extract timestamp from tweet
-                        try:
-                            time_elements = article.find_elements(By.XPATH, ".//time")
-                            if time_elements:
-                                tweet_data["timestamp"] = time_elements[0].get_attribute("datetime")
-                            else:
-                                tweet_data["timestamp"] = None
-                        except Exception:
-                            tweet_data["timestamp"] = None
-
-                        if "text" in tweet_data and tweet_data["text"].strip():
-                            tweets.append(tweet_data)
-                            seen_tweet_ids.add(tweet_data["id"])
-                            tweets_found_this_scroll_pass += 1
-
-                    error_tracker["tweet_extraction"]["status"] = "success"
 
                     if tweets_found_this_scroll_pass > 0:
                         log(f"[SCRAPE] Scroll {scroll_attempts}: Found {tweets_found_this_scroll_pass} new tweets. Total: {len(tweets)}")
@@ -1609,13 +1894,30 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                         consecutive_no_new_tweets_scrolls += 1
                         log(f"[SCRAPE] Scroll {scroll_attempts}: No new tweets. Consecutive empty scrolls: {consecutive_no_new_tweets_scrolls}")
 
+                        # Stall recovery: scroll UP ~2000px then back down to force
+                        # X.com to re-render the virtualized list and trigger fresh loading
+                        if consecutive_no_new_tweets_scrolls >= 2:
+                            log("[SCRAPE] Attempting stall recovery: scrolling up and back down...")
+                            driver.execute_script("window.scrollBy(0, -2000);")
+                            time.sleep(random.uniform(1.0, 2.0))
+                            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                            time.sleep(random.uniform(2.0, 3.0))
+                            recovery_extracted = extract_visible_tweets(
+                                driver, seen_tweet_ids, tweets, error_tracker,
+                                search_term, attempt, log
+                            )
+                            if recovery_extracted > 0:
+                                log(f"[SCRAPE] Stall recovery found {recovery_extracted} new tweets! Total: {len(tweets)}")
+                                consecutive_no_new_tweets_scrolls = 0
+
                     if consecutive_no_new_tweets_scrolls >= max_consecutive_no_new_tweets:
                         log(f"[SCRAPE] Reached {max_consecutive_no_new_tweets} consecutive scrolls with no new tweets. Stopping.")
                         break
 
+                    # Height-based stall detection
                     new_height = driver.execute_script("return document.body.scrollHeight")
-                    if new_height == last_height and scroll_attempts > 1:
-                        if consecutive_no_new_tweets_scrolls > 1:
+                    if new_height == last_height and scroll_attempts > 2:
+                        if consecutive_no_new_tweets_scrolls > 2:
                             log(f"[SCRAPE] Scroll height unchanged and no new tweets. Stopping.")
                             break
                     last_height = new_height
@@ -1662,6 +1964,12 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                     log(f"[DEDUPE] Final text-based deduplication: {len(tweets)} -> {len(unique_tweets_final)} tweets")
                 else:
                     log(f"[DEDUPE] No further duplicates found by text from {len(tweets)} tweets.")
+                
+                # Tag each tweet with the source tab
+                for tweet in unique_tweets_final:
+                    if "source_tab" not in tweet:
+                        tweet["source_tab"] = "top" if search_tab == "top" else "latest"
+                
                 error_tracker["deduplication"]["status"] = "success"
                 return unique_tweets_final
             except Exception as e_dedupe_final:
@@ -1692,6 +2000,67 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
     log(f"[FAILURE] All {max_retries} attempts failed for '{search_term}'.")
     return []
 
+def scrape_both_tabs(search_term, progress_callback=None, request_delay=10):
+    """
+    Scrape both Top and Latest tabs, merge and deduplicate.
+    Top tab yields curated, higher-quality tweets (Twitter's algorithm).
+    Latest tab yields real-time, higher-volume tweets.
+    Uses separate browser sessions per tab (Option A) for stability.
+    """
+    def log(message):
+        print(message)
+        if progress_callback:
+            progress_callback(message)
+
+    all_tweets = []
+    seen_ids = set()
+
+    # Top tab first (higher quality, curated by Twitter's algorithm)
+    log("[DUAL-TAB] Scraping Top tab for curated tweets...")
+    top_messages = []
+    def collect_top(msg):
+        top_messages.append(msg)
+    top_tweets = scrape_twitter_trends(
+        search_term, search_tab="top",
+        progress_callback=collect_top,
+        request_delay=request_delay
+    )
+    for msg in top_messages:
+        if progress_callback:
+            progress_callback(msg)
+    for t in top_tweets:
+        tid = t.get("id")
+        if tid and tid not in seen_ids:
+            seen_ids.add(tid)
+            all_tweets.append(t)
+    log(f"[DUAL-TAB] Top tab: {len(top_tweets)} tweets scraped, {len(all_tweets)} unique so far.")
+
+    # Latest tab (real-time, volume)
+    log("[DUAL-TAB] Scraping Latest tab for real-time tweets...")
+    live_messages = []
+    def collect_live(msg):
+        live_messages.append(msg)
+    live_tweets = scrape_twitter_trends(
+        search_term, search_tab="live",
+        progress_callback=collect_live,
+        request_delay=request_delay
+    )
+    for msg in live_messages:
+        if progress_callback:
+            progress_callback(msg)
+    live_added = 0
+    for t in live_tweets:
+        tid = t.get("id")
+        if tid and tid not in seen_ids:
+            seen_ids.add(tid)
+            all_tweets.append(t)
+            live_added += 1
+    log(f"[DUAL-TAB] Latest tab: {len(live_tweets)} tweets scraped, {live_added} new unique added.")
+    log(f"[DUAL-TAB] Combined total: {len(all_tweets)} unique tweets from both tabs.")
+
+    return all_tweets
+
+
 def run_twitter_analysis_script(search_term, use_aliases=False):
     """
     Run the Twitter analysis pipeline and yield progress updates.
@@ -1707,20 +2076,24 @@ def run_twitter_analysis_script(search_term, use_aliases=False):
         yield "[INFO] Alias search is enabled."
     
     try:
-        # Step 1: Scraping tweets
-        yield "[STEP 1/5] Scraping and initial deduplicating tweets..."
+        # Step 1: Scraping tweets from both Top and Latest tabs
+        yield "[STEP 1/5] Scraping tweets from Top and Latest tabs..."
+        yield "[INFO] Scraping Top tab first (curated tweets), then Latest tab (real-time)."
         raw_tweets = []
         
         messages = []
         def collect_message(msg):
             messages.append(msg)
         
-        raw_tweets = scrape_twitter_trends(search_term, progress_callback=collect_message)
+        raw_tweets = scrape_both_tabs(search_term, progress_callback=collect_message)
         
         for msg in messages:
             yield msg
-            
-        yield f"[INFO] Scraping complete. Found {len(raw_tweets)} unique tweets."
+        
+        # Report per-tab breakdown
+        top_count = sum(1 for t in raw_tweets if t.get("source_tab") == "top")
+        latest_count = sum(1 for t in raw_tweets if t.get("source_tab") == "latest")
+        yield f"[INFO] Scraping complete. Found {len(raw_tweets)} unique tweets (Top: {top_count}, Latest: {latest_count})."
         
         if not raw_tweets:
             yield "[ERROR] No tweets found or scraping failed for the given search term."

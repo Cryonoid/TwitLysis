@@ -1,3 +1,5 @@
+ip_asgn/
+.agents/
 #env
 twitter_cookies.json
 twt_venv/
