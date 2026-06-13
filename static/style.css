@@ -1781,6 +1781,36 @@ footer p {
     margin-left: 6px;
 }
 
+/* --- Source Tab Badge (Top / Live) --- */
+.source-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    margin-left: 2px;
+    vertical-align: middle;
+}
+.source-badge.source-top {
+    background: rgba(255, 215, 0, 0.15);
+    color: #ffd700;
+    border: 1px solid rgba(255, 215, 0, 0.3);
+}
+.source-badge.source-latest {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* --- Tweets Filters Row --- */
+.tweets-filters {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
 /* --- Comparison chart containers --- */
 .compare-charts {
     display: grid;

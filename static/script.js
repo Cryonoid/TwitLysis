@@ -70,7 +70,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Step timeline state
     const STEP_LABELS = [
-        'Scraping & Deduplicating',
+        'Scraping Top & Latest Tabs',
         'Saving Raw Tweets',
         '4-Signal Relevancy Scoring',
         'Clustering & Velocity Analysis',
@@ -108,11 +108,23 @@ document.addEventListener('DOMContentLoaded', function () {
     // =========================================================================
     searchQueryInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !searchButton.disabled) {
-            startSearch();
+            const batchToggle = document.getElementById('batch-checkbox');
+            if (batchToggle && batchToggle.checked) {
+                startBatchSearch();
+            } else {
+                startSearch();
+            }
         }
     });
 
-    searchButton.addEventListener('click', startSearch);
+    searchButton.addEventListener('click', () => {
+        const batchToggle = document.getElementById('batch-checkbox');
+        if (batchToggle && batchToggle.checked) {
+            startBatchSearch();
+        } else {
+            startSearch();
+        }
+    });
 
     // =========================================================================
     // Raw Log Toggle
@@ -346,6 +358,128 @@ document.addEventListener('DOMContentLoaded', function () {
         };
     }
 
+    // =========================================================================
+    // Batch Search — Multi-term sequential analysis
+    // =========================================================================
+    function startBatchSearch() {
+        const rawInput = searchQueryInput.value.trim();
+        if (!rawInput) {
+            searchStatus.textContent = 'Please enter comma-separated search terms';
+            searchStatus.className = 'search-status error';
+            return;
+        }
+
+        const terms = rawInput.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        if (terms.length < 1) {
+            searchStatus.textContent = 'Please enter at least one search term';
+            searchStatus.className = 'search-status error';
+            return;
+        }
+        if (terms.length > 10) {
+            searchStatus.textContent = 'Maximum 10 terms per batch';
+            searchStatus.className = 'search-status error';
+            return;
+        }
+
+        // Close any existing EventSource
+        if (activeEventSource) {
+            activeEventSource.close();
+            activeEventSource = null;
+        }
+
+        // Reset UI
+        searchStatus.textContent = `Batch analysis: ${terms.length} terms queued`;
+        searchStatus.className = 'search-status';
+        searchButton.disabled = true;
+        resetTimeline();
+        switchPanel('search-panel');
+
+        const aliasChecked = document.getElementById('alias-checkbox')?.checked ? 'true' : 'false';
+        activeEventSource = new EventSource(
+            `/api/batch-search?terms=${encodeURIComponent(terms.join(','))}&alias=${aliasChecked}`
+        );
+
+        activeEventSource.onmessage = function (event) {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.error) {
+                    appendRawLog(data.message, 'error');
+                    searchStatus.textContent = 'Batch error occurred';
+                    searchStatus.className = 'search-status error';
+                    searchButton.disabled = false;
+                    closeEventSource();
+                    return;
+                }
+
+                const msg = data.message || '';
+
+                // Detect step transitions within current term
+                if (msg.includes('[STEP ')) {
+                    try {
+                        const stepNum = parseInt(msg.split('[STEP ')[1].split('/')[0]);
+                        if (stepNum > currentStepNum) {
+                            if (currentStepNum > 0) markStepDone(currentStepNum);
+                            currentStepNum = stepNum;
+                            const label = STEP_LABELS[stepNum - 1] || `Step ${stepNum}`;
+                            createStepCard(stepNum, label);
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                // Detect batch transitions — reset timeline for each new term
+                if (msg.includes('[BATCH ') && msg.includes('═══ Starting')) {
+                    if (currentStepNum > 0) markStepDone(currentStepNum);
+                    currentStepNum = 0;
+                    // Don't fully reset — keep log visible
+                    stepTimeline.innerHTML = '';
+                    currentStepCards = [];
+                    document.querySelectorAll('.step-segment').forEach(seg => {
+                        seg.className = 'step-segment';
+                        seg.querySelector('span').textContent = seg.dataset.step;
+                    });
+                }
+
+                if (msg) {
+                    const cls = classifyMessage(msg);
+                    appendRawLog(msg, cls);
+                    if (currentStepNum > 0 && !msg.includes('[STEP ') && !msg.includes('[START]') && !msg.includes('[INFO] This may take')) {
+                        appendToStep(currentStepNum, msg, cls);
+                    }
+                }
+
+                // Update batch progress in status bar
+                if (msg.includes('[BATCH ') && msg.includes('/')) {
+                    try {
+                        const batchPart = msg.split('[BATCH ')[1].split(']')[0];
+                        searchStatus.textContent = `Batch progress: ${batchPart}`;
+                    } catch (e) { /* ignore */ }
+                }
+
+                if (data.progress === 100 || (msg && msg.includes('[BATCH COMPLETE]'))) {
+                    if (currentStepNum > 0) markStepDone(currentStepNum);
+                    searchButton.disabled = false;
+                    searchStatus.textContent = `Batch complete! ${terms.length} terms analyzed.`;
+                    searchStatus.className = 'search-status success';
+                    closeEventSource();
+                    setTimeout(() => {
+                        loadPreviousResults();
+                        loadTrends();
+                    }, 800);
+                }
+            } catch (e) {
+                console.error('Batch SSE parse error:', e);
+            }
+        };
+
+        activeEventSource.onerror = function () {
+            appendRawLog('[ERROR] Batch connection lost', 'error');
+            searchStatus.textContent = 'Batch connection error';
+            searchStatus.className = 'search-status error';
+            searchButton.disabled = false;
+            closeEventSource();
+        };
+    }
+
     function closeEventSource() {
         if (activeEventSource) {
             activeEventSource.close();
@@ -541,6 +675,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 // Language filter
                 populateLanguageFilter(data.language_distribution, data.tweets);
 
+                // Source filter
+                populateSourceFilter(data.source_tab_breakdown, data.tweets);
+
                 // Tweets
                 const tweetsContainer = document.getElementById('selected-tweets');
                 tweetsContainer.innerHTML = '';
@@ -565,6 +702,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const el = document.createElement('div');
         el.className = 'tweet';
         if (tweet.language) el.dataset.lang = tweet.language;
+        if (tweet.source_tab) el.dataset.source = tweet.source_tab;
 
         const username = tweet.username || 'unknown';
         const score = tweet.relevancy_score || 0;
@@ -574,6 +712,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const lang = tweet.language || 'en';
         const spamFlag = tweet.spam_flag || false;
         const influence = tweet.influence_score || 0;
+        const sourceTab = tweet.source_tab || 'latest';
         // Flag overly long tweets (aggregate/spam pattern)
         const isLongForm = text.length > 800;
 
@@ -593,7 +732,12 @@ document.addEventListener('DOMContentLoaded', function () {
             `;
         }
 
-        let badges = `<span class="lang-badge">${lang}</span>`;
+        // Source tab badge
+        const sourceBadge = sourceTab === 'top'
+            ? '<span class="source-badge source-top">⭐ Top</span>'
+            : '<span class="source-badge source-latest">🔴 Live</span>';
+
+        let badges = sourceBadge + `<span class="lang-badge">${lang}</span>`;
         if (spamFlag) badges += `<span class="spam-badge"><i class="fas fa-exclamation-triangle"></i> Spam</span>`;
         if (influence > 0.7) badges += `<span class="influence-badge"><i class="fas fa-bolt"></i> High Influence</span>`;
         if (isLongForm) badges += `<span class="spam-badge" title="This tweet is unusually long — may be an aggregate/digest post"><i class="fas fa-align-left"></i> Long-form</span>`;
@@ -927,6 +1071,39 @@ document.addEventListener('DOMContentLoaded', function () {
                 });
             });
             sel._hasFilterListener = true;
+        }
+        sel.value = 'all';
+    }
+
+    // =========================================================================
+    // Source Tab Filter
+    // =========================================================================
+    function populateSourceFilter(sourceBreakdown, tweets) {
+        const sel = document.getElementById('source-filter');
+        if (!sel) return;
+
+        // Update option labels with counts
+        if (sourceBreakdown) {
+            const topOpt = sel.querySelector('option[value="top"]');
+            const latestOpt = sel.querySelector('option[value="latest"]');
+            if (topOpt) topOpt.textContent = `⭐ Top (${sourceBreakdown.top || 0})`;
+            if (latestOpt) latestOpt.textContent = `🔴 Latest (${sourceBreakdown.latest || 0})`;
+        }
+
+        if (!sel._hasSourceFilterListener) {
+            sel.addEventListener('change', () => {
+                const filter = sel.value;
+                const container = document.getElementById('selected-tweets');
+                const tweetElements = container.querySelectorAll('.tweet');
+                tweetElements.forEach(el => {
+                    if (filter === 'all' || el.dataset.source === filter) {
+                        el.style.display = '';
+                    } else {
+                        el.style.display = 'none';
+                    }
+                });
+            });
+            sel._hasSourceFilterListener = true;
         }
         sel.value = 'all';
     }

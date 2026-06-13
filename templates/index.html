@@ -63,6 +63,10 @@
                         <input type="checkbox" id="alias-checkbox">
                         <span>Alias Search</span>
                     </label>
+                    <label class="alias-toggle" id="batch-toggle-label" title="Analyze multiple comma-separated terms sequentially">
+                        <input type="checkbox" id="batch-checkbox">
+                        <span>Batch Mode</span>
+                    </label>
                     <button id="search-button"><i class="fas fa-bolt"></i> Analyze</button>
                 </div>
                 <div id="category-chips" class="category-chips"></div>
@@ -174,9 +178,16 @@
                         <div class="detail-col">
                             <div class="tweets-header">
                                 <h4>Top Tweets</h4>
-                                <select id="language-filter" class="language-filter" title="Filter by language">
-                                    <option value="all">🌐 All Languages</option>
-                                </select>
+                                <div class="tweets-filters">
+                                    <select id="source-filter" class="language-filter" title="Filter by source tab">
+                                        <option value="all">📡 All Sources</option>
+                                        <option value="top">⭐ Top</option>
+                                        <option value="latest">🔴 Latest</option>
+                                    </select>
+                                    <select id="language-filter" class="language-filter" title="Filter by language">
+                                        <option value="all">🌐 All Languages</option>
+                                    </select>
+                                </div>
                             </div>
                             <div id="selected-tweets" class="tweet-list"></div>
                         </div>

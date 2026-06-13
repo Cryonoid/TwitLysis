@@ -1541,12 +1541,13 @@ def extract_visible_tweets(driver, seen_tweet_ids, tweets, error_tracker, search
         error_tracker["tweet_extraction"]["error"] = str(e)
     return tweets_found_this_pass
 
-def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, progress_callback=None, search_tab="live") -> list:
+def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, progress_callback=None, search_tab="live", max_scroll_override=None) -> list:
     """
     Scrape tweets related to the search term from X with enhanced anti-ban features.
     Returns a list of tweet dictionaries or empty list if failed.
     
     If progress_callback is provided, it will be called with status messages.
+    max_scroll_override: Override default max_scroll_attempts (for per-tab budgeting).
     """
     def log(message):
         print(message)
@@ -1556,7 +1557,7 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
     driver = None
     attempt = 1
     tweets = []
-    rate_limit_requests = 10
+    rate_limit_requests = 20
     requests_made = 0
 
     while attempt <= max_retries:
@@ -1811,11 +1812,12 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             seen_tweet_ids = set()
             last_height = driver.execute_script("return document.body.scrollHeight")
             scroll_attempts = 0
-            max_scroll_attempts = 15
+            max_scroll_attempts = max_scroll_override if max_scroll_override else 15
             consecutive_no_new_tweets_scrolls = 0
             max_consecutive_no_new_tweets = 5
+            recent_yields = []  # Rolling window for dynamic yield-based stopping
 
-            log("[SCRAPE] Starting to scroll and collect tweets...")
+            log(f"[SCRAPE] Starting to scroll and collect tweets (max {max_scroll_attempts} scrolls, tab={search_tab})...")
             error_tracker["page_scroll"]["status"] = "in_progress"
             scrape_start_time = time.time()
             SCRAPE_TIMEOUT_SECONDS = 300  # 5-minute wall-clock guard
@@ -1909,6 +1911,20 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                             if recovery_extracted > 0:
                                 log(f"[SCRAPE] Stall recovery found {recovery_extracted} new tweets! Total: {len(tweets)}")
                                 consecutive_no_new_tweets_scrolls = 0
+
+                    # Dynamic yield-based stopping: track rolling 3-scroll average.
+                    # If yield drops below 2 tweets/scroll and we already have ≥30,
+                    # stop early instead of wasting scrolls on a depleted feed.
+                    recent_yields.append(tweets_found_this_scroll_pass)
+                    if len(recent_yields) > 3:
+                        recent_yields.pop(0)
+                    if (len(recent_yields) >= 3 and
+                            sum(recent_yields) / len(recent_yields) < 2 and
+                            len(tweets) >= 30):
+                        avg_yield = sum(recent_yields) / len(recent_yields)
+                        log(f"[SCRAPE] Yield dropping (avg {avg_yield:.1f}/scroll over last 3). "
+                            f"Stopping with {len(tweets)} tweets.")
+                        break
 
                     if consecutive_no_new_tweets_scrolls >= max_consecutive_no_new_tweets:
                         log(f"[SCRAPE] Reached {max_consecutive_no_new_tweets} consecutive scrolls with no new tweets. Stopping.")
@@ -2020,10 +2036,12 @@ def scrape_both_tabs(search_term, progress_callback=None, request_delay=10):
     top_messages = []
     def collect_top(msg):
         top_messages.append(msg)
+    top_start = time.time()
     top_tweets = scrape_twitter_trends(
         search_term, search_tab="top",
         progress_callback=collect_top,
-        request_delay=request_delay
+        request_delay=request_delay,
+        max_scroll_override=10  # Top tab: curated results are finite
     )
     for msg in top_messages:
         if progress_callback:
@@ -2033,17 +2051,20 @@ def scrape_both_tabs(search_term, progress_callback=None, request_delay=10):
         if tid and tid not in seen_ids:
             seen_ids.add(tid)
             all_tweets.append(t)
-    log(f"[DUAL-TAB] Top tab: {len(top_tweets)} tweets scraped, {len(all_tweets)} unique so far.")
+    top_elapsed = time.time() - top_start
+    log(f"[DUAL-TAB] Top tab: {len(top_tweets)} tweets scraped, {len(all_tweets)} unique so far. ({top_elapsed:.0f}s)")
 
     # Latest tab (real-time, volume)
     log("[DUAL-TAB] Scraping Latest tab for real-time tweets...")
     live_messages = []
     def collect_live(msg):
         live_messages.append(msg)
+    live_start = time.time()
     live_tweets = scrape_twitter_trends(
         search_term, search_tab="live",
         progress_callback=collect_live,
-        request_delay=request_delay
+        request_delay=request_delay,
+        max_scroll_override=20  # Latest tab: real-time content keeps flowing
     )
     for msg in live_messages:
         if progress_callback:
@@ -2055,10 +2076,33 @@ def scrape_both_tabs(search_term, progress_callback=None, request_delay=10):
             seen_ids.add(tid)
             all_tweets.append(t)
             live_added += 1
-    log(f"[DUAL-TAB] Latest tab: {len(live_tweets)} tweets scraped, {live_added} new unique added.")
+    live_elapsed = time.time() - live_start
+    log(f"[DUAL-TAB] Latest tab: {len(live_tweets)} tweets scraped, {live_added} new unique added. ({live_elapsed:.0f}s)")
     log(f"[DUAL-TAB] Combined total: {len(all_tweets)} unique tweets from both tabs.")
 
     return all_tweets
+
+
+def run_batch_analysis(terms: list, use_aliases=False):
+    """
+    Run analysis on multiple terms sequentially, yielding progress for each.
+    Includes cooldown between terms to avoid rate limiting.
+    """
+    total = len(terms)
+    for idx, term in enumerate(terms, 1):
+        yield f"[BATCH {idx}/{total}] ═══ Starting analysis for: '{term}' ═══"
+        try:
+            for msg in run_twitter_analysis_script(term, use_aliases=use_aliases):
+                yield msg
+            yield f"[BATCH {idx}/{total}] ✓ Completed '{term}'."
+        except Exception as e:
+            yield f"[BATCH {idx}/{total}] ✗ Failed '{term}': {str(e)}"
+        # Cooldown between terms to avoid rate limiting
+        if idx < total:
+            cooldown = random.randint(30, 60)
+            yield f"[BATCH] Cooling down {cooldown}s before next term..."
+            time.sleep(cooldown)
+    yield f"[BATCH COMPLETE] All {total} terms analyzed."
 
 
 def run_twitter_analysis_script(search_term, use_aliases=False):

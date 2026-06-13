@@ -114,6 +114,44 @@ def search():
     
     return Response(generate(), content_type='text/event-stream')
 
+@app.route('/api/batch-search')
+def batch_search():
+    """Run analysis on multiple comma-separated terms sequentially via SSE."""
+    terms_param = request.args.get('terms', '')
+    use_aliases = request.args.get('alias', 'false').lower() == 'true'
+    if not terms_param:
+        return jsonify({"error": "No terms provided"}), 400
+    
+    terms = [t.strip() for t in terms_param.split(',') if t.strip()][:10]  # Max 10 terms
+    if not terms:
+        return jsonify({"error": "No valid terms found"}), 400
+    
+    def generate():
+        try:
+            total = len(terms)
+            for message in twitter_analyzer.run_batch_analysis(terms, use_aliases=use_aliases):
+                # Calculate rough batch progress
+                batch_match = None
+                current_term_idx = 0
+                if "[BATCH " in message:
+                    try:
+                        batch_part = message.split("[BATCH ")[1].split("]")[0]
+                        current_term_idx = int(batch_part.split("/")[0])
+                    except (ValueError, IndexError):
+                        pass
+                
+                progress = min(int((current_term_idx / total) * 100), 95) if total > 0 else 0
+                
+                data = {"message": message, "progress": progress}
+                yield f"data: {json.dumps(data)}\n\n"
+                time.sleep(0.05)
+            
+            yield f"data: {json.dumps({'message': '[COMPLETE] Batch analysis finished.', 'progress': 100})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': True, 'message': f'[ERROR] Batch error: {str(e)}'})}\\n\\n"
+    
+    return Response(generate(), content_type='text/event-stream')
+
 @app.route('/api/available-terms')
 def get_available_terms():
     """Return list of terms for which we have analysis results"""
@@ -186,7 +224,8 @@ def get_term_details():
                 "spam_flag": tweet.get('spam_flag', False),
                 "influence_score": tweet.get('influence_score', 0),
                 "engagement": eng,
-                "tweet_url": tweet.get('tweet_url', '')
+                "tweet_url": tweet.get('tweet_url', ''),
+                "source_tab": tweet.get('source_tab', 'latest')
             })
         
         # Extract enhanced v3 data (clusters, velocity, language distribution)
@@ -209,7 +248,11 @@ def get_term_details():
             "language_distribution": lang_dist,
             "spam_flagged_count": spam_count,
             "high_influence_count": high_influence,
-            "search_context": search_context
+            "search_context": search_context,
+            "source_tab_breakdown": {
+                "top": sum(1 for t in all_raw_tweets if t.get('source_tab') == 'top'),
+                "latest": sum(1 for t in all_raw_tweets if t.get('source_tab') == 'latest')
+            }
         })
         
     except Exception as e:
