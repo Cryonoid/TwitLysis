@@ -20,10 +20,12 @@ app = Flask(__name__)
 # Directory paths
 RAW_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tweets", "raw")
 RESULTS_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tweets", "results")
+HISTORY_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tweets", "history")
 
 # Ensure directories exist
 os.makedirs(RAW_TWEETS_DIR, exist_ok=True)
 os.makedirs(RESULTS_TWEETS_DIR, exist_ok=True)
+os.makedirs(HISTORY_TWEETS_DIR, exist_ok=True)
 
 # Lazy-loaded VADER instance (downloads lexicon on first use)
 _vader = None
@@ -63,12 +65,27 @@ def _parse_engagement(tweet):
 def index():
     return render_template('index.html')
 
+@app.route('/api/cancel', methods=['POST', 'GET'])
+def cancel_search():
+    """Trigger cancellation signal for any currently running scrape."""
+    try:
+        twitter_analyzer.set_cancellation_flag(True)
+        return jsonify({
+            "status": "success",
+            "message": "Cancellation request sent to scraping engine."
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route('/api/search')
 def search():
     query = request.args.get('query', '')
     use_aliases = request.args.get('alias', 'false').lower() == 'true'
     if not query:
         return jsonify({"error": "No query provided"}), 400
+
+    # Reset cancellation flag for fresh search
+    twitter_analyzer.set_cancellation_flag(False)
     
     def generate():
         try:
@@ -148,7 +165,7 @@ def batch_search():
             
             yield f"data: {json.dumps({'message': '[COMPLETE] Batch analysis finished.', 'progress': 100})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': True, 'message': f'[ERROR] Batch error: {str(e)}'})}\\n\\n"
+            yield f"data: {json.dumps({'error': True, 'message': f'[ERROR] Batch error: {str(e)}'})}\n\n"
     
     return Response(generate(), content_type='text/event-stream')
 
@@ -164,6 +181,111 @@ def get_available_terms():
                 terms.append(term)
     
     return jsonify(terms)
+
+@app.route('/api/term-history')
+def get_term_history():
+    """
+    Return historical trend score snapshots for a given search term.
+    Scans tweets/history/<safe_term>/ directory and reads all snapshot files.
+    Also falls back to checking tweets/results/<term>_results.yaml if history folder is empty.
+    Returns JSON payload with chronological snapshots, delta vs previous run, and metadata.
+    """
+    term = request.args.get('term', '').strip()
+    if not term:
+        return jsonify({"error": "No search term provided"}), 400
+
+    safe_term = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in term)
+    history_dir = os.path.join(HISTORY_TWEETS_DIR, safe_term)
+
+    snapshots = []
+
+    # 1. Read files from history directory if it exists
+    if os.path.exists(history_dir):
+        for fname in sorted(os.listdir(history_dir)):
+            if fname.endswith(".yaml") or fname.endswith(".yml"):
+                fpath = os.path.join(history_dir, fname)
+                try:
+                    file_mtime = os.path.getmtime(fpath)
+                    dt_obj = datetime.fromtimestamp(file_mtime)
+
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+
+                    if not isinstance(data, dict):
+                        continue
+
+                    score = int(data.get("trend_relevancy", 0))
+                    tweet_count = int(data.get("tweets_count", len(data.get("tweets", []))))
+                    scrape_status = data.get("scrape_status", "complete")
+                    vel = data.get("velocity", {})
+                    vel_tpm = vel.get("velocity_tpm", 0) if isinstance(vel, dict) else 0
+
+                    snapshots.append({
+                        "timestamp": dt_obj.isoformat(),
+                        "date_formatted": dt_obj.strftime("%b %d, %H:%M"),
+                        "trend_score": score,
+                        "tweet_count": tweet_count,
+                        "velocity_tpm": vel_tpm,
+                        "scrape_status": scrape_status,
+                        "filename": fname
+                    })
+                except Exception as e:
+                    print(f"[HISTORY] Error reading snapshot {fname}: {str(e)}")
+
+    # 2. Also check primary results file if no history or to ensure latest is included
+    primary_file = os.path.join(RESULTS_TWEETS_DIR, f"{term.replace(' ', '_')}_results.yaml")
+    if os.path.exists(primary_file):
+        try:
+            mtime = os.path.getmtime(primary_file)
+            dt_obj = datetime.fromtimestamp(mtime)
+            with open(primary_file, 'r', encoding='utf-8') as f:
+                pdata = yaml.safe_load(f)
+            if isinstance(pdata, dict):
+                score = int(pdata.get("trend_relevancy", 0))
+                tweet_count = int(pdata.get("tweets_count", len(pdata.get("tweets", []))))
+                scrape_status = pdata.get("scrape_status", "complete")
+                vel = pdata.get("velocity", {})
+                vel_tpm = vel.get("velocity_tpm", 0) if isinstance(vel, dict) else 0
+
+                primary_snap = {
+                    "timestamp": dt_obj.isoformat(),
+                    "date_formatted": dt_obj.strftime("%b %d, %H:%M"),
+                    "trend_score": score,
+                    "tweet_count": tweet_count,
+                    "velocity_tpm": vel_tpm,
+                    "scrape_status": scrape_status,
+                    "is_latest": True
+                }
+
+                # Avoid duplicate if history snapshot already matched timestamp
+                if not any(abs((datetime.fromisoformat(s["timestamp"]) - dt_obj).total_seconds()) < 60 for s in snapshots):
+                    snapshots.append(primary_snap)
+        except Exception as e:
+            print(f"[HISTORY] Error reading primary result for history: {str(e)}")
+
+    # Sort snapshots chronologically
+    snapshots.sort(key=lambda s: s["timestamp"])
+
+    # Calculate delta vs previous run
+    delta = {"score_change": 0, "direction": "neutral", "has_prev": False, "prev_score": 0}
+    if len(snapshots) >= 2:
+        curr_score = snapshots[-1]["trend_score"]
+        prev_score = snapshots[-2]["trend_score"]
+        diff = curr_score - prev_score
+        delta = {
+            "score_change": abs(diff),
+            "raw_diff": diff,
+            "direction": "up" if diff > 0 else ("down" if diff < 0 else "neutral"),
+            "has_prev": True,
+            "prev_score": prev_score
+        }
+
+    return jsonify({
+        "term": term,
+        "snapshots": snapshots,
+        "history_count": len(snapshots),
+        "delta": delta
+    })
 
 @app.route('/api/term-details')
 def get_term_details():
@@ -228,13 +350,91 @@ def get_term_details():
                 "source_tab": tweet.get('source_tab', 'latest')
             })
         
-        # Extract enhanced v3 data (clusters, velocity, language distribution)
+        # Calculate media statistics & extract media gallery items
+        media_tweets = [t for t in all_raw_tweets if t.get('has_media') or t.get('media_urls')]
+        all_media_items = []
+        photo_count = 0
+        video_count = 0
+        gif_count = 0
+
+        for t in all_raw_tweets:
+            m_urls = t.get('media_urls', [])
+            if m_urls:
+                photo_count += len(m_urls)
+                for u in m_urls:
+                    if u not in [item["url"] for item in all_media_items]:
+                        all_media_items.append({
+                            "url": u,
+                            "type": "photo",
+                            "username": t.get("username", ""),
+                            "tweet_url": t.get("tweet_url", "")
+                        })
+            if t.get('has_video'):
+                video_count += 1
+            if t.get('has_gif'):
+                gif_count += 1
+
+        total_tweet_count = len(all_raw_tweets)
+        media_density_pct = round((len(media_tweets) / total_tweet_count * 100), 1) if total_tweet_count > 0 else 0
+
+        media_summary = {
+            "media_tweet_count": len(media_tweets),
+            "media_density_pct": media_density_pct,
+            "photo_count": photo_count,
+            "video_count": video_count,
+            "gif_count": gif_count,
+            "all_media_items": all_media_items[:60]
+        }
+
+        # Extract cluster, velocity, and enrichment data from YAML
         clusters = data.get('clusters', {})
         velocity = data.get('velocity', {})
-        lang_dist = data.get('language_distribution', {})
-        spam_count = data.get('spam_flagged_count', 0)
-        high_influence = data.get('high_influence_count', 0)
-        search_context = data.get('search_context', 'general')
+
+        # Language distribution from tweet data
+        lang_counts = {}
+        for t in all_raw_tweets:
+            lang = t.get('language', 'en') or 'en'
+            lang_counts[lang] = lang_counts.get(lang, 0) + 1
+        lang_dist = lang_counts
+
+        # Spam and influence counts
+        spam_count = sum(1 for t in all_raw_tweets if t.get('spam_flag'))
+        high_influence = sum(1 for t in all_raw_tweets if t.get('influence_score', 0) >= 7)
+
+        # Search context from YAML or derive from data
+        search_context = data.get('search_context', {
+            "search_term": term,
+            "total_tweets": len(all_raw_tweets),
+        })
+
+        # Calculate data freshness
+        mtime = os.path.getmtime(filename)
+        scraped_dt = datetime.fromtimestamp(mtime)
+        now_dt = datetime.now()
+        age_seconds = max(0, (now_dt - scraped_dt).total_seconds())
+
+        if age_seconds < 60:
+            age_display = "Just now"
+            freshness_status = "fresh"
+        elif age_seconds < 3600:
+            mins = int(age_seconds // 60)
+            age_display = f"{mins}m ago"
+            freshness_status = "fresh"
+        elif age_seconds < 86400:
+            hours = int(age_seconds // 3600)
+            age_display = f"{hours}h ago"
+            freshness_status = "fresh" if hours < 12 else "stale"
+        else:
+            days = int(age_seconds // 86400)
+            age_display = f"{days}d ago"
+            freshness_status = "outdated"
+
+        freshness_info = {
+            "scraped_at": scraped_dt.strftime("%b %d, %Y %H:%M"),
+            "age_display": age_display,
+            "freshness_status": freshness_status,
+            "timestamp_iso": scraped_dt.isoformat()
+        }
         
         return jsonify({
             "term": term,
@@ -249,6 +449,8 @@ def get_term_details():
             "spam_flagged_count": spam_count,
             "high_influence_count": high_influence,
             "search_context": search_context,
+            "media_summary": media_summary,
+            "freshness": freshness_info,
             "source_tab_breakdown": {
                 "top": sum(1 for t in all_raw_tweets if t.get('source_tab') == 'top'),
                 "latest": sum(1 for t in all_raw_tweets if t.get('source_tab') == 'latest')

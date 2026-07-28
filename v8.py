@@ -33,8 +33,19 @@ from webdriver_manager.chrome import ChromeDriverManager
 # Output directory paths
 RAW_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tweets", "raw")
 RESULTS_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tweets", "results")
+HISTORY_TWEETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tweets", "history")
 
-# Existing error_tracker and SEARCH_TERMS
+# Global cancellation flag for aborting running searches
+CANCEL_REQUESTED = False
+
+def set_cancellation_flag(val=True):
+    global CANCEL_REQUESTED
+    CANCEL_REQUESTED = val
+
+def is_cancellation_requested():
+    global CANCEL_REQUESTED
+    return CANCEL_REQUESTED
+
 error_tracker = {
     "driver_setup": {"status": "not_started", "error": None},
     "page_load": {"status": "not_started", "error": None},
@@ -154,7 +165,25 @@ def load_cookies(config_file="twitter_cookies.json"):
                 "ct0": str(ct0).strip() if ct0 else None,
             }
 
-        print(f"[WARNING] Cookie file {config_file} not found.")
+        # Primary cookie file not found — try backup
+        backup_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "twitter_cookies_backup.json")
+        if backup_file != os.path.abspath(config_file) and os.path.exists(backup_file):
+            print(f"[AUTH] Primary cookie file not found. Trying backup: {backup_file}")
+            try:
+                with open(backup_file, "r", encoding="utf-8") as f:
+                    cookies = json.load(f)
+                auth_token = cookies.get("auth_token")
+                ct0 = cookies.get("ct0")
+                if auth_token:
+                    print("[AUTH] Using backup cookie file successfully.")
+                    return {
+                        "auth_token": str(auth_token).strip(),
+                        "ct0": str(ct0).strip() if ct0 else None,
+                    }
+            except Exception as e_backup:
+                print(f"[WARNING] Backup cookie file also failed: {str(e_backup)}")
+
+        print(f"[WARNING] No valid cookie files found ({config_file}).")
         return None
     except Exception as e:
         print(f"[ERROR] Failed to load cookies from {config_file}: {str(e)}")
@@ -1388,6 +1417,23 @@ def save_to_yaml(data: dict, filename: str, is_raw: bool = False) -> bool:
         with open(filepath, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
         print(f"[FILE] Successfully saved data to {filepath}")
+
+        # Also save a timestamped snapshot to tweets/history/<term>/ for historical tracking
+        if not is_raw:
+            try:
+                term_name = data.get("search_term", filename.replace("_results.yaml", ""))
+                safe_term = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(term_name))
+                history_term_dir = os.path.join(HISTORY_TWEETS_DIR, safe_term)
+                os.makedirs(history_term_dir, exist_ok=True)
+
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                history_filepath = os.path.join(history_term_dir, f"{timestamp_str}_results.yaml")
+                with open(history_filepath, "w", encoding="utf-8") as f_hist:
+                    yaml.safe_dump(data, f_hist, sort_keys=False, allow_unicode=True)
+                print(f"[HISTORY] Saved snapshot to {history_filepath}")
+            except Exception as e_hist:
+                print(f"[WARNING] Could not save historical snapshot: {str(e_hist)}")
+
         current_op_status = "success"
         if "results.yaml" in filename or "raw.yaml" in filename:
             error_tracker["file_operations"]["status"] = "success"
@@ -1529,6 +1575,49 @@ def extract_visible_tweets(driver, seen_tweet_ids, tweets, error_tracker, search
             except Exception:
                 tweet_data["timestamp"] = None
 
+            # Extract media URLs (photos, videos, GIFs)
+            try:
+                media_urls = []
+                has_video = False
+                has_gif = False
+
+                # Images (photo container)
+                img_elements = article.find_elements(By.XPATH, ".//div[@data-testid='tweetPhoto']//img")
+                for img in img_elements:
+                    src = img.get_attribute("src")
+                    if src and not src.startswith("data:"):
+                        media_urls.append(src)
+
+                # Videos (video component)
+                video_elements = article.find_elements(By.XPATH, ".//div[@data-testid='videoComponent']")
+                if video_elements:
+                    has_video = True
+                    for vid in video_elements:
+                        poster = vid.find_elements(By.XPATH, ".//img")
+                        for p_img in poster:
+                            p_src = p_img.get_attribute("src")
+                            if p_src and p_src not in media_urls and not p_src.startswith("data:"):
+                                media_urls.append(p_src)
+
+                # GIFs (tweet video thumb / card)
+                gif_elements = article.find_elements(By.XPATH, ".//div[contains(@data-testid, 'card')]//img[contains(@src, 'tweet_video_thumb')]")
+                if gif_elements:
+                    has_gif = True
+                    for g_img in gif_elements:
+                        g_src = g_img.get_attribute("src")
+                        if g_src and g_src not in media_urls:
+                            media_urls.append(g_src)
+
+                tweet_data["media_urls"] = media_urls
+                tweet_data["has_video"] = has_video
+                tweet_data["has_gif"] = has_gif
+                tweet_data["has_media"] = len(media_urls) > 0 or has_video or has_gif
+            except Exception:
+                tweet_data["media_urls"] = []
+                tweet_data["has_video"] = False
+                tweet_data["has_gif"] = False
+                tweet_data["has_media"] = False
+
             if "text" in tweet_data and tweet_data["text"].strip():
                 tweets.append(tweet_data)
                 seen_tweet_ids.add(tweet_data["id"])
@@ -1540,6 +1629,60 @@ def extract_visible_tweets(driver, seen_tweet_ids, tweets, error_tracker, search
         error_tracker["tweet_extraction"]["status"] = "partial"
         error_tracker["tweet_extraction"]["error"] = str(e)
     return tweets_found_this_pass
+
+
+def _is_search_page_loaded(driver, search_term):
+    """Check if the page loaded as a search page but tweets may not have rendered yet."""
+    try:
+        current_url = driver.current_url.lower()
+        page_title = driver.title.lower()
+        term_lower = search_term.strip().lower()
+
+        is_on_search = "x.com/search" in current_url or "twitter.com/search" in current_url
+        title_matches = term_lower in page_title or "search" in page_title
+
+        return is_on_search and title_matches
+    except Exception:
+        return False
+
+
+def _attempt_hydration_recovery(driver, search_term, attempt, log_fn):
+    """
+    When a search page loads (correct title/URL) but tweet articles don't render,
+    try triggering X.com's SPA hydration via scroll + wait.
+    Returns True if tweets became visible.
+    """
+    try:
+        log_fn("[RECOVERY] Attempting SPA hydration: scroll trigger + extended wait...")
+
+        # Scroll down slightly to trigger intersection observers
+        driver.execute_script("window.scrollTo(0, 300);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+
+        # Click on the page body to signal user activity
+        try:
+            body = driver.find_element(By.TAG_NAME, "body")
+            body.click()
+        except Exception:
+            pass
+        time.sleep(1)
+
+        # Wait for tweet articles with extended timeout
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//article[@data-testid='tweet']"))
+        )
+        log_fn("[RECOVERY] SPA hydration succeeded \u2014 tweets now visible.")
+        return True
+    except TimeoutException:
+        log_fn("[RECOVERY] SPA hydration failed \u2014 tweets still not rendering after extended wait.")
+        save_debug_html(driver.page_source, search_term, attempt, "hydration_failed")
+        return False
+    except Exception as e:
+        log_fn(f"[RECOVERY] Hydration attempt error: {str(e)}")
+        return False
+
 
 def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, progress_callback=None, search_tab="live", max_scroll_override=None) -> list:
     """
@@ -1561,6 +1704,11 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
     requests_made = 0
 
     while attempt <= max_retries:
+        # ── Early cancellation check (before driver setup) ──
+        if is_cancellation_requested():
+            log("[CANCEL] Cancellation requested before driver setup. Aborting immediately.")
+            return []
+
         log(f"[ATTEMPT {attempt}/{max_retries}] Scraping for '{search_term}'...")
         try:
             # Driver Setup
@@ -1568,6 +1716,8 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             log(f"[SETUP] Initializing Chrome WebDriver...")
 
             chrome_options = Options()
+            chrome_options.add_argument("--log-level=3")
+            chrome_options.add_argument("--silent")
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
@@ -1689,6 +1839,14 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             driver.execute_script("Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });")
             error_tracker["driver_setup"]["status"] = "success"
             
+            # ── Cancellation check (before cookie application) ──
+            if is_cancellation_requested():
+                log("[CANCEL] Cancellation requested before cookie application. Aborting.")
+                if driver:
+                    try: driver.quit()
+                    except: pass
+                return []
+
             # Load cookies for authentication
             cookies = load_cookies()
             if cookies and cookies.get("auth_token"):
@@ -1717,6 +1875,15 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                             "path": "/",
                         })
                     log("[AUTH] Cookies applied successfully.")
+                    # Verify the session is actually authenticated before proceeding
+                    auth_ok, auth_reason = verify_authenticated_session(driver, search_term, attempt, log)
+                    if not auth_ok:
+                        log(f"[AUTH] Session verification failed: {auth_reason}")
+                        log("[AUTH] Cookies may be expired or rate-limited. Skipping this attempt.")
+                        error_tracker["auth_verification"]["status"] = "failed"
+                        error_tracker["auth_verification"]["error"] = auth_reason
+                        attempt += 1
+                        continue
                     error_tracker["auth_verification"]["status"] = "success"
                 except Exception as e:
                     log(f"[ERROR] Failed to set cookies: {str(e)}")
@@ -1729,6 +1896,14 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                 error_tracker["auth_verification"]["error"] = "No auth_token available"
                 log("[WARNING] No auth_token available; proceeding without authenticated session.")
 
+            # ── Cancellation check (before page load) ──
+            if is_cancellation_requested():
+                log("[CANCEL] Cancellation requested before page load. Aborting.")
+                if driver:
+                    try: driver.quit()
+                    except: pass
+                return []
+
             # Page Load with CAPTCHA Detection
             error_tracker["page_load"]["status"] = "in_progress"
             if search_tab == "top":
@@ -1738,8 +1913,9 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
             log(f"[NETWORK] Accessing URL: {url}")
 
             try:
+                page_load_timeout = 35 if attempt == 1 else 50
                 driver.get(url)
-                WebDriverWait(driver, 20).until(
+                WebDriverWait(driver, page_load_timeout).until(
                     EC.any_of(
                         EC.presence_of_element_located((By.XPATH, "//article[@data-testid='tweet']")),
                         EC.presence_of_element_located((By.XPATH, "//input[@name='session[username_or_email]']")),
@@ -1795,12 +1971,29 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                 error_tracker["page_load"]["status"] = "success"
 
             except TimeoutException:
-                error_tracker["page_load"]["status"] = "failed"
-                error_tracker["page_load"]["error"] = "Page load timeout: Key elements not found."
-                log(f"[ERROR] Page load timed out. Current URL: {driver.current_url}, Title: {driver.title}")
-                save_debug_html(driver.page_source, search_term, attempt, "timeout")
-                attempt += 1
-                continue
+                log(f"[WARNING] Page load timed out ({page_load_timeout}s). Current URL: {driver.current_url}, Title: {driver.title}")
+
+                # Soft-load recovery: if the page loaded correctly (right URL/title)
+                # but tweet articles haven't rendered, try SPA hydration trigger
+                if _is_search_page_loaded(driver, search_term):
+                    log("[INFO] Page is on correct search URL. Attempting hydration recovery...")
+                    if _attempt_hydration_recovery(driver, search_term, attempt, log):
+                        log("[INFO] Recovery successful \u2014 proceeding to scrape.")
+                        error_tracker["page_load"]["status"] = "success"
+                        # Fall through to the scraping section below (don't continue/retry)
+                    else:
+                        error_tracker["page_load"]["status"] = "failed"
+                        error_tracker["page_load"]["error"] = "Page loaded but tweets never rendered (SPA hydration failure)"
+                        save_debug_html(driver.page_source, search_term, attempt, "timeout_hydration_failed")
+                        attempt += 1
+                        continue
+                else:
+                    error_tracker["page_load"]["status"] = "failed"
+                    error_tracker["page_load"]["error"] = "Page load timeout: Key elements not found."
+                    log(f"[ERROR] Page load timed out on non-search page. Saving debug HTML.")
+                    save_debug_html(driver.page_source, search_term, attempt, "timeout")
+                    attempt += 1
+                    continue
             except Exception as e:
                 error_tracker["page_load"]["status"] = "failed"
                 error_tracker["page_load"]["error"] = str(e)
@@ -1831,6 +2024,10 @@ def scrape_twitter_trends(search_term: str, max_retries=2, request_delay=10, pro
                 log(f"[SCRAPE] Initial extraction: Found {initial_tweets} tweets before scrolling.")
 
             while scroll_attempts < max_scroll_attempts and requests_made < rate_limit_requests:
+                if is_cancellation_requested():
+                    log("[SCRAPE] Cancellation requested by user. Aborting scraping loop...")
+                    break
+
                 scroll_attempts += 1
                 requests_made += 1
                 tweets_found_this_scroll_pass = 0
@@ -2054,6 +2251,10 @@ def scrape_both_tabs(search_term, progress_callback=None, request_delay=10):
     top_elapsed = time.time() - top_start
     log(f"[DUAL-TAB] Top tab: {len(top_tweets)} tweets scraped, {len(all_tweets)} unique so far. ({top_elapsed:.0f}s)")
 
+    # Inter-tab breather to let X.com connection pools flush
+    log("[DUAL-TAB] Pausing 4s before Latest tab scrape...")
+    time.sleep(4)
+
     # Latest tab (real-time, volume)
     log("[DUAL-TAB] Scraping Latest tab for real-time tweets...")
     live_messages = []
@@ -2086,22 +2287,50 @@ def scrape_both_tabs(search_term, progress_callback=None, request_delay=10):
 def run_batch_analysis(terms: list, use_aliases=False):
     """
     Run analysis on multiple terms sequentially, yielding progress for each.
-    Includes cooldown between terms to avoid rate limiting.
+    Includes adaptive cooldown with exponential backoff on consecutive failures.
     """
     total = len(terms)
+    consecutive_failures = 0
     for idx, term in enumerate(terms, 1):
         yield f"[BATCH {idx}/{total}] ═══ Starting analysis for: '{term}' ═══"
+        term_success = True
         try:
             for msg in run_twitter_analysis_script(term, use_aliases=use_aliases):
                 yield msg
-            yield f"[BATCH {idx}/{total}] ✓ Completed '{term}'."
+                # Detect failure signals from the analysis generator
+                if "[ERROR] No tweets found" in msg or "[FAILURE]" in msg:
+                    term_success = False
+
+            if term_success:
+                consecutive_failures = 0
+                yield f"[BATCH {idx}/{total}] \u2713 Completed '{term}'."
+            else:
+                consecutive_failures += 1
+                yield f"[BATCH {idx}/{total}] \u2717 Completed with errors for '{term}'."
         except Exception as e:
-            yield f"[BATCH {idx}/{total}] ✗ Failed '{term}': {str(e)}"
-        # Cooldown between terms to avoid rate limiting
+            consecutive_failures += 1
+            term_success = False
+            yield f"[BATCH {idx}/{total}] \u2717 Failed '{term}': {str(e)}"
+
+        # Emit structured status for frontend per-term tracking
+        status_data = {"term": term, "status": "success" if term_success else "failed", "index": idx, "total": total}
+        yield f"[BATCH_STATUS] {json.dumps(status_data)}"
+
+        # Adaptive cooldown between terms with exponential backoff
         if idx < total:
-            cooldown = random.randint(30, 60)
-            yield f"[BATCH] Cooling down {cooldown}s before next term..."
-            time.sleep(cooldown)
+            base_cooldown = random.randint(45, 75)
+            if consecutive_failures >= 2:
+                # Exponential backoff on consecutive failures, cap at 180s
+                backoff = min(int(base_cooldown * (2 ** min(consecutive_failures - 1, 3))), 180)
+                yield f"[BATCH] \u26a0 {consecutive_failures} consecutive failure(s). Extended cooldown {backoff}s..."
+                time.sleep(backoff)
+            elif consecutive_failures == 1:
+                extended = int(base_cooldown * 1.5)
+                yield f"[BATCH] Previous term had issues. Cooling down {extended}s..."
+                time.sleep(extended)
+            else:
+                yield f"[BATCH] Cooling down {base_cooldown}s before next term..."
+                time.sleep(base_cooldown)
     yield f"[BATCH COMPLETE] All {total} terms analyzed."
 
 
@@ -2137,7 +2366,18 @@ def run_twitter_analysis_script(search_term, use_aliases=False):
         # Report per-tab breakdown
         top_count = sum(1 for t in raw_tweets if t.get("source_tab") == "top")
         latest_count = sum(1 for t in raw_tweets if t.get("source_tab") == "latest")
-        yield f"[INFO] Scraping complete. Found {len(raw_tweets)} unique tweets (Top: {top_count}, Latest: {latest_count})."
+
+        # Determine scrape status for result metadata
+        if not raw_tweets:
+            scrape_status = "failed"
+        elif top_count == 0 and latest_count > 0:
+            scrape_status = "partial_latest_only"
+        elif latest_count == 0 and top_count > 0:
+            scrape_status = "partial_top_only"
+        else:
+            scrape_status = "complete"
+
+        yield f"[INFO] Scraping complete. Found {len(raw_tweets)} unique tweets (Top: {top_count}, Latest: {latest_count}). Status: {scrape_status}"
         
         if not raw_tweets:
             yield "[ERROR] No tweets found or scraping failed for the given search term."
@@ -2183,6 +2423,7 @@ def run_twitter_analysis_script(search_term, use_aliases=False):
             "trend_relevancy": trend_score,
             "search_term": search_term,
             "tweets_count": len(final_tweets),
+            "scrape_status": scrape_status,
             "search_context": classify_search_context(search_term),
             "velocity": velocity_data,
             "clusters": cluster_data,

@@ -68,10 +68,15 @@
                         <span>Batch Mode</span>
                     </label>
                     <button id="search-button"><i class="fas fa-bolt"></i> Analyze</button>
+                    <button id="cancel-button" class="cancel-button" style="display: none;"><i class="fas fa-stop-circle"></i> Cancel</button>
                 </div>
                 <div id="category-chips" class="category-chips"></div>
                 <div id="search-status" class="search-status"></div>
+                <div id="error-recovery-container" class="error-recovery-container" style="display: none;"></div>
             </div>
+
+            <!-- Batch Status Dashboard -->
+            <div id="batch-status-container" class="batch-status-container" style="display: none;"></div>
 
             <!-- Segmented Step Progress -->
             <div id="step-progress" class="step-progress" style="display: none;">
@@ -146,8 +151,21 @@
                     </div>
                 </div>
                 <div id="selected-term-details" class="term-details" style="display: none;">
-                    <!-- Velocity badge -->
-                    <div id="velocity-badge" class="velocity-badge-area"></div>
+                    <!-- Term Actions & Freshness Bar -->
+                    <div class="term-actions-bar" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid var(--border-color, rgba(255,255,255,0.08));">
+                        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                            <div id="freshness-badge" class="freshness-badge"></div>
+                            <div id="velocity-badge" class="velocity-badge-area"></div>
+                            <div id="history-badge" class="history-badge-area"></div>
+                        </div>
+                        <button id="rescrape-button" class="btn-rescrape" title="Re-scrape this term to fetch fresh data">
+                            <i class="fas fa-sync-alt"></i> Refresh Data
+                        </button>
+                    </div>
+
+                    <!-- Media Density Metric Widget -->
+                    <div id="media-density-widget" class="media-density-widget" style="display:none;margin-bottom:14px;"></div>
+
                     <!-- Conversation map summary -->
                     <div id="cluster-summary" class="cluster-summary"></div>
                     <div class="details-grid">
@@ -157,6 +175,13 @@
                                 <canvas id="selected-sentiment-chart"></canvas>
                             </div>
                             <div id="signal-strength-badge" class="signal-badge"></div>
+                            <!-- Historical Trend Score Evolution -->
+                            <div id="history-section" class="history-section" style="display:none; margin-top:1rem;">
+                                <h4><i class="fas fa-history" style="color:var(--primary);margin-right:6px;"></i>Trend Score Evolution</h4>
+                                <div class="chart-container-sm" id="history-chart-container">
+                                    <canvas id="history-line-chart"></canvas>
+                                </div>
+                            </div>
                             <!-- Sparkline velocity chart -->
                             <h4 style="margin-top:1rem;">Tweet Velocity</h4>
                             <div class="chart-container-sm" id="velocity-chart-container" style="display:none;">
@@ -197,6 +222,11 @@
                         <h4><i class="fas fa-project-diagram"></i> Topic Clusters</h4>
                         <div id="clusters-accordion" class="clusters-accordion"></div>
                     </div>
+                    <!-- Media Gallery Section -->
+                    <div id="media-gallery-section" class="media-gallery-section" style="display:none; margin-top: 1.5rem;">
+                        <h4><i class="fas fa-images"></i> Media Gallery</h4>
+                        <div id="media-gallery-grid" class="media-gallery-grid"></div>
+                    </div>
                 </div>
                 <div id="no-term-selected" class="no-selection">
                     <p><i class="fas fa-info-circle"></i> Select a term from the dropdown to view detailed analysis</p>
@@ -220,6 +250,15 @@
             <p>TwitLysis &copy; 2026 &mdash; Twitter Trend Analysis Tool</p>
         </footer>
     </main>
+
+    <!-- Media Lightbox Modal -->
+    <div id="media-modal" class="media-modal" style="display: none;">
+        <span id="close-media-modal" class="close-media-modal">&times;</span>
+        <div class="media-modal-content">
+            <img id="media-modal-img" src="" alt="Media Detail">
+            <div id="media-modal-caption" class="media-modal-caption"></div>
+        </div>
+    </div>
 
     <script src="/static/script.js"></script>
 </body>

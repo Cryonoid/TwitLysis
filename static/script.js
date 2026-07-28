@@ -156,6 +156,13 @@ document.addEventListener('DOMContentLoaded', function () {
         rawLogContainer.classList.add('collapsed');
         rawLogToggle.classList.remove('expanded');
         rawLogToggle.querySelector('span').textContent = 'Show raw log';
+
+        // Reset batch status container
+        const batchContainer = document.getElementById('batch-status-container');
+        if (batchContainer) {
+            batchContainer.innerHTML = '';
+            batchContainer.style.display = 'none';
+        }
     }
 
     function createStepCard(stepNum, title) {
@@ -359,8 +366,46 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // =========================================================================
-    // Batch Search — Multi-term sequential analysis
+    // Batch Search — Multi-term sequential analysis with per-term status cards
     // =========================================================================
+    function initBatchDashboard(terms) {
+        const container = document.getElementById('batch-status-container');
+        if (!container) return;
+        container.innerHTML = '';
+        container.style.display = 'flex';
+
+        terms.forEach((term, idx) => {
+            const index1 = idx + 1;
+            const card = document.createElement('div');
+            card.className = 'batch-term-card queued';
+            card.id = `batch-term-card-${index1}`;
+            card.innerHTML = `
+                <span class="batch-term-status-icon"><i class="fas fa-clock"></i></span>
+                <span>${index1}/${terms.length}: ${escapeHtml(term)}</span>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    function setBatchTermRunning(index) {
+        const card = document.getElementById(`batch-term-card-${index}`);
+        if (!card) return;
+        card.className = 'batch-term-card running';
+        const icon = card.querySelector('.batch-term-status-icon');
+        if (icon) icon.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    }
+
+    function updateBatchTermStatus(statusData) {
+        const card = document.getElementById(`batch-term-card-${statusData.index}`);
+        if (!card) return;
+        const isSuccess = statusData.status === 'success';
+        card.className = `batch-term-card ${isSuccess ? 'success' : 'failed'}`;
+        const icon = card.querySelector('.batch-term-status-icon');
+        if (icon) {
+            icon.innerHTML = isSuccess ? '<i class="fas fa-check"></i>' : '<i class="fas fa-times"></i>';
+        }
+    }
+
     function startBatchSearch() {
         const rawInput = searchQueryInput.value.trim();
         if (!rawInput) {
@@ -392,6 +437,7 @@ document.addEventListener('DOMContentLoaded', function () {
         searchStatus.className = 'search-status';
         searchButton.disabled = true;
         resetTimeline();
+        initBatchDashboard(terms);
         switchPanel('search-panel');
 
         const aliasChecked = document.getElementById('alias-checkbox')?.checked ? 'true' : 'false';
@@ -413,6 +459,17 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 const msg = data.message || '';
 
+                // Handle structured BATCH_STATUS messages
+                if (msg.includes('[BATCH_STATUS]')) {
+                    try {
+                        const statusJsonStr = msg.split('[BATCH_STATUS]')[1].trim();
+                        const statusData = JSON.parse(statusJsonStr);
+                        updateBatchTermStatus(statusData);
+                    } catch (e) {
+                        console.error('Error parsing BATCH_STATUS:', e);
+                    }
+                }
+
                 // Detect step transitions within current term
                 if (msg.includes('[STEP ')) {
                     try {
@@ -426,11 +483,16 @@ document.addEventListener('DOMContentLoaded', function () {
                     } catch (e) { /* ignore */ }
                 }
 
-                // Detect batch transitions — reset timeline for each new term
+                // Detect batch transitions — reset step timeline & highlight current term card
                 if (msg.includes('[BATCH ') && msg.includes('═══ Starting')) {
+                    try {
+                        const idxStr = msg.split('[BATCH ')[1].split('/')[0];
+                        const termIdx = parseInt(idxStr);
+                        if (!isNaN(termIdx)) setBatchTermRunning(termIdx);
+                    } catch (e) {}
+
                     if (currentStepNum > 0) markStepDone(currentStepNum);
                     currentStepNum = 0;
-                    // Don't fully reset — keep log visible
                     stepTimeline.innerHTML = '';
                     currentStepCards = [];
                     document.querySelectorAll('.step-segment').forEach(seg => {
@@ -497,6 +559,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function finishSearch(query) {
         searchButton.disabled = false;
+        if (cancelButton) cancelButton.style.display = 'none';
         searchStatus.textContent = 'Analysis complete!';
         searchStatus.className = 'search-status success';
         closeEventSource();
@@ -669,6 +732,15 @@ document.addEventListener('DOMContentLoaded', function () {
                 // Velocity sparkline chart
                 renderVelocityChart(data.velocity);
 
+                // Load historical trend score evolution & delta badge
+                loadTermHistory(term);
+
+                // Render freshness badge
+                renderFreshnessBadge(data.freshness);
+
+                // Render media summary & gallery
+                renderMediaSummary(data.media_summary);
+
                 // Cluster summary + accordion (pass all_tweets for browsing)
                 renderClusters(data.clusters, data.all_tweets || []);
 
@@ -732,6 +804,15 @@ document.addEventListener('DOMContentLoaded', function () {
             `;
         }
 
+        // Inline media preview
+        let mediaHtml = '';
+        if (tweet.media_urls && tweet.media_urls.length > 0) {
+            const mediaImgs = tweet.media_urls.map(url => `
+                <img src="${escapeHtml(url)}" class="tweet-media-img" loading="lazy" alt="Tweet media">
+            `).join('');
+            mediaHtml = `<div class="tweet-media-preview">${mediaImgs}</div>`;
+        }
+
         // Source tab badge
         const sourceBadge = sourceTab === 'top'
             ? '<span class="source-badge source-top">⭐ Top</span>'
@@ -744,6 +825,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         el.innerHTML = `
             <p class="tweet-text">${escapeHtml(text)}</p>
+            ${mediaHtml}
             <div class="tweet-meta">
                 <span class="tweet-username">${escapeHtml(username)}</span>
                 <span class="tweet-score">Relevancy: ${score}%</span>
@@ -947,6 +1029,102 @@ document.addEventListener('DOMContentLoaded', function () {
                 scales: {
                     x: { ticks: { color: '#536471', font: { size: 10 } }, grid: { display: false } },
                     y: { ticks: { color: '#536471', font: { size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' }, beginAtZero: true }
+                }
+            }
+        });
+    }
+
+    // =========================================================================
+    // History Badge + Score Evolution Line Chart
+    // =========================================================================
+    function loadTermHistory(term) {
+        fetch(`/api/term-history?term=${encodeURIComponent(term)}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) return;
+                renderHistoryBadge(data.delta);
+                renderHistoryChart(data.snapshots);
+            })
+            .catch(err => console.error('Error loading term history:', err));
+    }
+
+    function renderHistoryBadge(delta) {
+        const container = document.getElementById('history-badge');
+        if (!container) return;
+        if (!delta || !delta.has_prev) {
+            container.style.display = 'none';
+            container.innerHTML = '';
+            return;
+        }
+
+        container.style.display = 'inline-flex';
+        const dir = delta.direction;
+        const diff = delta.raw_diff;
+        const icon = dir === 'up' ? 'fa-arrow-up' : (dir === 'down' ? 'fa-arrow-down' : 'fa-minus');
+        const sign = diff > 0 ? '+' : '';
+        
+        container.className = `history-badge ${dir}`;
+        container.innerHTML = `
+            <i class="fas ${icon}"></i>
+            <span>${sign}${diff} pts vs previous run</span>
+        `;
+    }
+
+    function renderHistoryChart(snapshots) {
+        const section = document.getElementById('history-section');
+        const canvas = document.getElementById('history-line-chart');
+        if (!section || !canvas) return;
+
+        if (!snapshots || snapshots.length < 2) {
+            section.style.display = 'none';
+            return;
+        }
+
+        section.style.display = 'block';
+        destroyChart('history-line-chart');
+
+        const labels = snapshots.map(s => s.date_formatted);
+        const scores = snapshots.map(s => s.trend_score);
+
+        chartInstances['history-line-chart'] = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Trend Score',
+                    data: scores,
+                    borderColor: '#1da1f2',
+                    backgroundColor: 'rgba(29, 161, 242, 0.12)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    pointBackgroundColor: '#1da1f2',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const snap = snapshots[context.dataIndex];
+                                return `Score: ${snap.trend_score}/100 (${snap.tweet_count} tweets)`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { ticks: { color: '#8899a6', font: { size: 10 } }, grid: { display: false } },
+                    y: {
+                        ticks: { color: '#8899a6', font: { size: 10 } },
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                        min: 0,
+                        max: 100
+                    }
                 }
             }
         });
@@ -1323,6 +1501,171 @@ document.addEventListener('DOMContentLoaded', function () {
             return isoString;
         }
     }
+
+    // =========================================================================
+    // Phase C — Freshness Badges, Media Gallery & Error Recovery Handlers
+    // =========================================================================
+
+    function renderFreshnessBadge(freshness) {
+        const el = document.getElementById('freshness-badge');
+        if (!el) return;
+        if (!freshness || !freshness.age_display) {
+            el.style.display = 'none';
+            return;
+        }
+        el.style.display = 'inline-flex';
+        const status = freshness.freshness_status || 'fresh';
+        const iconMap = { fresh: 'fa-check-circle', stale: 'fa-clock', outdated: 'fa-exclamation-triangle' };
+        el.className = `freshness-badge status-${status}`;
+        el.innerHTML = `<i class="fas ${iconMap[status] || 'fa-info-circle'}"></i> Scraped ${escapeHtml(freshness.age_display)} (${escapeHtml(freshness.scraped_at || '')})`;
+    }
+
+    function renderMediaSummary(mediaSummary) {
+        const widget = document.getElementById('media-density-widget');
+        const gallerySection = document.getElementById('media-gallery-section');
+        const galleryGrid = document.getElementById('media-gallery-grid');
+        if (!widget || !gallerySection || !galleryGrid) return;
+
+        if (!mediaSummary || !mediaSummary.media_tweet_count) {
+            widget.style.display = 'none';
+            gallerySection.style.display = 'none';
+            return;
+        }
+
+        // Widget
+        widget.style.display = 'block';
+        const pct = mediaSummary.media_density_pct || 0;
+        widget.innerHTML = `
+            <div class="media-density-header">
+                <span><i class="fas fa-photo-video" style="color:var(--primary);margin-right:6px;"></i>Media Density</span>
+                <span>${pct}% of tweets contain media (${mediaSummary.media_tweet_count} posts)</span>
+            </div>
+            <div class="media-density-bar-wrapper">
+                <div class="media-density-bar-fill" style="width: ${pct}%"></div>
+            </div>
+            <div class="media-breakdown-pills">
+                <span class="media-pill"><i class="fas fa-image"></i> ${mediaSummary.photo_count || 0} Images</span>
+                <span class="media-pill"><i class="fas fa-video"></i> ${mediaSummary.video_count || 0} Videos</span>
+                <span class="media-pill"><i class="fas fa-film"></i> ${mediaSummary.gif_count || 0} GIFs</span>
+            </div>
+        `;
+
+        // Gallery Grid
+        const items = mediaSummary.all_media_items || [];
+        if (items.length > 0) {
+            gallerySection.style.display = 'block';
+            galleryGrid.innerHTML = '';
+            const frag = document.createDocumentFragment();
+            items.forEach(item => {
+                const thumb = document.createElement('div');
+                thumb.className = 'media-thumb-box';
+                thumb.innerHTML = `
+                    <img src="${escapeHtml(item.url)}" alt="Media thumbnail" loading="lazy">
+                    <span class="media-type-icon"><i class="fas ${item.type === 'video' ? 'fa-play' : 'fa-image'}"></i></span>
+                `;
+                thumb.addEventListener('click', () => {
+                    openMediaModal(item.url, item.username, item.tweet_url);
+                });
+                frag.appendChild(thumb);
+            });
+            galleryGrid.appendChild(frag);
+        } else {
+            gallerySection.style.display = 'none';
+        }
+    }
+
+    function renderErrorRecovery(errorMsg) {
+        const container = document.getElementById('error-recovery-container');
+        if (!container) return;
+        container.style.display = 'block';
+        container.innerHTML = `
+            <div class="error-recovery-card">
+                <div class="error-recovery-header">
+                    <i class="fas fa-exclamation-triangle"></i> Analysis Error Encountered
+                </div>
+                <div class="error-recovery-body">
+                    <p>${escapeHtml(errorMsg)}</p>
+                    <p style="margin-top:6px;font-size:0.78rem;color:var(--text-muted);">
+                        Suggestions: Check your network connection, ensure cookies are valid, or retry after a brief cooldown.
+                    </p>
+                </div>
+                <div class="error-recovery-actions">
+                    <button class="btn-rescrape" id="error-retry-btn"><i class="fas fa-redo"></i> Retry Analysis</button>
+                </div>
+            </div>
+        `;
+        document.getElementById('error-retry-btn')?.addEventListener('click', () => {
+            container.style.display = 'none';
+            if (searchButton) searchButton.click();
+        });
+    }
+
+    function openMediaModal(url, username, tweetUrl) {
+        const modal = document.getElementById('media-modal');
+        const img = document.getElementById('media-modal-img');
+        const caption = document.getElementById('media-modal-caption');
+        if (!modal || !img) return;
+        img.src = url;
+        caption.innerHTML = username ? `Posted by @${escapeHtml(username)} ${tweetUrl ? `<a href="${escapeHtml(tweetUrl)}" target="_blank" style="color:var(--primary);margin-left:8px;"><i class="fas fa-external-link-alt"></i> View Tweet</a>` : ''}` : '';
+        modal.style.display = 'flex';
+    }
+
+    // Modal close event listener
+    document.getElementById('close-media-modal')?.addEventListener('click', () => {
+        const modal = document.getElementById('media-modal');
+        if (modal) modal.style.display = 'none';
+    });
+
+    // Cancel search button handler
+    const cancelButton = document.getElementById('cancel-button');
+    if (cancelButton) {
+        cancelButton.addEventListener('click', () => {
+            // Immediately close SSE connection for instant client-side cancellation
+            closeEventSource();
+
+            // Immediately reset UI state
+            searchButton.disabled = false;
+            cancelButton.style.display = 'none';
+            if (searchStatus) {
+                searchStatus.textContent = 'Cancelling...';
+                searchStatus.className = 'search-status warning';
+            }
+
+            // Send cancellation signal to backend to stop the scraper
+            fetch('/api/cancel', { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    showToast('Search cancelled.', 'info');
+                    if (searchStatus) {
+                        searchStatus.textContent = 'Search cancelled by user.';
+                        searchStatus.className = 'search-status warning';
+                    }
+                    // Refresh results in case partial data was saved
+                    setTimeout(() => loadPreviousResults(), 500);
+                })
+                .catch(err => console.error('Cancel request error:', err));
+        });
+    }
+
+    // Re-scrape button handler
+    const rescrapeBtn = document.getElementById('rescrape-button');
+    if (rescrapeBtn) {
+        rescrapeBtn.addEventListener('click', () => {
+            if (_currentTermData && _currentTermData.term) {
+                searchQueryInput.value = _currentTermData.term;
+                switchPanel('search-panel');
+                if (searchButton) searchButton.click();
+            }
+        });
+    }
+
+    // Toggle Cancel button visibility during search
+    const origStartSearch = startSearch;
+    searchButton?.addEventListener('click', () => {
+        const errContainer = document.getElementById('error-recovery-container');
+        if (errContainer) errContainer.style.display = 'none';
+        if (cancelButton) cancelButton.style.display = 'inline-flex';
+    });
 
     // =========================================================================
     // Initial Load
